@@ -1,0 +1,14 @@
+# Research material (reverse-engineering notes, recordings, runs, mod overrides, tools): local only for now
+/research/
+
+# Build output
+/build/
+/third_party/physx-build/
+
+# Third-party binaries (see README.md)
+/third_party/uasi/
+
+# Python and editor leftovers
+__pycache__/
+*.pyc
+.vs/
