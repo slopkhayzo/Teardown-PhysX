@@ -1,0 +1,32 @@
+// The plugin's file properties (Windows Explorer > Properties > Details)
+#include <winver.h>
+
+#include "core/version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION TDPX_VERSION_MAJOR, TDPX_VERSION_MINOR, TDPX_VERSION_PATCH, 0
+PRODUCTVERSION TDPX_VERSION_MAJOR, TDPX_VERSION_MINOR, TDPX_VERSION_PATCH, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Teardown-PhysX: NVIDIA PhysX simulates Teardown's debris"
+            VALUE "FileVersion", TDPX_VERSION
+            VALUE "InternalName", "TeardownPhysX"
+            VALUE "LegalCopyright", "Copyright (c) 2026 slopkhayzo. MIT License."
+            VALUE "OriginalFilename", "TeardownPhysX.asi"
+            VALUE "ProductName", "Teardown-PhysX"
+            VALUE "ProductVersion", TDPX_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,4 +1,7 @@
 // TeardownPhysX.ini: next to the plugin, or the file named by the TDPX_INI environment variable.
+// The defaults are what a player gets. The test and benchmark scripts (tools\*.ps1) write [Session] Defaults=dev,
+// which starts from the development defaults instead (see Load): tracing on, PhysX off, the game's own rubble cleanup,
+// hung level frames ended after 30 s.
 #pragma once
 #include <string>
 
@@ -6,8 +9,10 @@ struct Config {
     std::string iniPath;
     std::string moduleDir;
 
-    // [Trace]
-    bool traceEnabled = true;
+    // [Trace] the timing tracer and diagnostics output (trace.bin, CSVs, a report every second in plugin.log), into a
+    // new run folder per session. Off: plugin.log (startup, problems, a report a minute) and crash dumps go to
+    // <module dir>\TeardownPhysX_logs, the previous session's log kept as plugin.prev.log.
+    bool traceEnabled = false;
     std::string outDir;    // a timestamped run folder is created inside (default <module dir>\TeardownPhysX_runs)
     std::string runDir;    // when set, used as the run folder exactly (queue jobs set this)
     std::string label = "manual";
@@ -50,7 +55,9 @@ struct Config {
     bool replayPinPlayer = true;    // keep the player on the recorded path (debris can push it elsewhere otherwise)
     std::string dumpBodies;  // [Session] DumpBodies = "0-2,208-222": every body at those frames to bodies.csv
     bool serialJobs = false; // [Session] SerialJobs: all engine jobs on one worker, in order (src/fix/serial_jobs.h)
-    int hangKillSeconds = 30; // [Session] HangKillSeconds: terminate the game when a level frame takes this long (0 = never)
+    // [Session] HangKillSeconds: terminate the game when a level frame takes this long (0 = never; a frame stuck for
+    // 5 s gets the main thread's stack in plugin.log either way)
+    int hangKillSeconds = 0;
 
     // [Bench] synthetic laser: carve holes into what the camera sees, quit
     bool benchEnabled = false;
@@ -113,7 +120,7 @@ struct Config {
     float toolCarveMsPerTick = 12.0f;
 
     // [PhysX] src/px/shadow.h. Shadow=1|2 (Phase 1) only watch; Shadow=3 (Phase 2) hands free debris to PhysX.
-    int pxShadow = 0;            // 0 off, 1 sync (each tick from the native state; compare), 2 free-running copy,
+    int pxShadow = 3;            // 0 off, 1 sync (each tick from the native state; compare), 2 free-running copy,
                                  // 3 offload (PhysX simulates free debris, the game draws and uses the result)
     int pxThreads = 0;           // PhysX CPU dispatcher threads (0: logical processors - 4, at least 2)
     int pxMaxBodyVoxels = 20000; // dynamic bodies up to this many solid voxels get a PhysX actor (larger: proxy)
@@ -138,7 +145,7 @@ struct Config {
     float pxGravity = -10.0f;
     float pxFriction = 0.6f, pxRestitution = 0.1f;
     bool pxTgs = false;
-    int pxLogEvery = 60;         // ticks between shadow.csv rows / log lines
+    int pxLogEvery = 0;          // ticks between shadow.csv rows / reports in plugin.log (0: 60 when tracing, else 3600)
     int pxDumpFrom = -1, pxDumpTo = -1;  // [PhysX] DumpTicks=a-b: every compared body to shadow_bodies.csv
     // offload (Shadow=3)
     bool pxPlayer = true;              // a kinematic capsule follows the player and pushes debris
@@ -215,7 +222,7 @@ struct Config {
     int pxDamageMax = 64;              // at most this many holes per tick from PhysX impacts
     // GPU rigid bodies (CUDA; an NVIDIA GPU and PhysXGpu_64.dll next to the plugin, else the CPU). The buffer sizes
     // are PhysX's GPU pre-allocations; plugin.log names the one to raise when a step needs more.
-    bool pxGpu = false;
+    bool pxGpu = true;
     bool pxGpuBroadphase = true;       // the broadphase on the GPU too
     int pxGpuContacts = 1 << 20, pxGpuPatches = 1 << 19;  // (Acacia piles need ~260k patches)
     int pxGpuPairs = 1 << 20, pxGpuAggregatePairs = 1 << 20;
@@ -230,7 +237,9 @@ struct Config {
     bool staticBodyUpdate = true;
     int staticBodyUpdateValidate = 64;
     bool visibleEarlyOut = true;    // IsBodyVisible stops at the first visible point (src/fix/visible_early_out.h)
-    bool keepDebris = false;        // the rubble cleanup deletes no small pieces (src/fix/keep_debris.h)
+    // the rubble cleanup deletes no small pieces (src/fix/keep_debris.h). The game deletes small resting debris unless
+    // it is within 5 m, or within 30 m and in view: what keeps its own physics affordable, and piles from forming.
+    bool keepDebris = true;
     int splitJobsMin = 16;          // new bodies from which a split's setup runs on workers (src/fix/split_jobs.h)
 
     void Load(const std::string& path);

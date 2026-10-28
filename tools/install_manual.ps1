@@ -16,6 +16,8 @@ New-Item -ItemType Directory -Force $staging | Out-Null
 Copy-Item (Join-Path $repo 'build\TeardownPhysX.asi') $staging -Force
 $ini = Join-Path $staging 'TeardownPhysX.ini'
 @(
+    '[Session]'
+    'Defaults=dev'
     '[Trace]'
     'Enabled=1'
     "OutDir=$(Join-Path $repo 'research\runs')"

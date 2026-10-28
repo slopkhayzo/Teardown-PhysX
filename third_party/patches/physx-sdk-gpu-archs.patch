@@ -1,15 +1,23 @@
 diff --git a/physx/source/compiler/cmakegpu/CMakeLists.txt b/physx/source/compiler/cmakegpu/CMakeLists.txt
-index 31f8aee..7cba700 100644
+index 31f8aee..433d971 100644
 --- a/physx/source/compiler/cmakegpu/CMakeLists.txt
 +++ b/physx/source/compiler/cmakegpu/CMakeLists.txt
-@@ -70,7 +70,10 @@ SET(SOURCE_DISTRO_FILE_LIST "")
+@@ -70,7 +70,18 @@ SET(SOURCE_DISTRO_FILE_LIST "")
  # No need to set --generate-code=arch=compute_75,code=[compute_75,sm_75]
  # since that's the default set in: compiler\internal\CMakeLists.txt (using CMAKE_CUDA_ARCHITECTURES)
  # see policy CMP0104
 -IF(PX_GENERATE_GPU_REDUCED_ARCHITECTURES)
 +IF(DEFINED PX_GPU_SASS_ARCHS)
-+	# Teardown-PhysX: a build for the GPUs at hand (tools\build_physx_gpu.cmd), e.g. SASS 89 with PTX 89 for newer ones
-+	GENERATE_ARCH_CODE_LIST(SASS "${PX_GPU_SASS_ARCHS}" PTX "${PX_GPU_PTX_ARCH}")
++	# Teardown-PhysX (tools\build_physx_gpu.cmd): machine code for each of PX_GPU_SASS_ARCHS and PTX for
++	# PX_GPU_PTX_ARCH only, for newer GPUs to JIT. GENERATE_ARCH_CODE_LIST adds PTX for every architecture, which only
++	# makes the DLL bigger when each GPU generation has its machine code.
++	SET(ARCH_CODE_LIST "")
++	STRING(REPLACE "," ";" PX_GPU_SASS_LIST "${PX_GPU_SASS_ARCHS}")
++	FOREACH(arch IN LISTS PX_GPU_SASS_LIST)
++		SET(ARCH_CODE_LIST "${ARCH_CODE_LIST}--generate-code=arch=compute_${arch},code=[sm_${arch}];")
++	ENDFOREACH()
++	SET(ARCH_CODE_LIST "${ARCH_CODE_LIST}--generate-code=arch=compute_${PX_GPU_PTX_ARCH},code=[compute_${PX_GPU_PTX_ARCH}];")
++	SET(ARCH_CODE_LIST ${ARCH_CODE_LIST} CACHE INTERNAL "")
 +ELSEIF(PX_GENERATE_GPU_REDUCED_ARCHITECTURES)
  	GENERATE_ARCH_CODE_LIST(SASS "80,86,89,90,100,120" PTX "120")
  ELSE()

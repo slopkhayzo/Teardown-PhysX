@@ -121,7 +121,7 @@ $sections = [ordered]@{
     'Sandbox' = [ordered]@{ AppDataRoot = $live }
     # optimized copies of mod files (research\mods); -Set 'Mods.Overrides=' plays the mods as published
     'Mods'    = [ordered]@{ Overrides = (Join-Path $repo 'research\mods\overrides') }
-    'Session' = [ordered]@{ Mode = 'record' }
+    'Session' = [ordered]@{ Defaults = 'dev'; Mode = 'record' }  # Defaults=dev: the plugin's development defaults
     'Level'   = [ordered]@{ Mod = $Mod; Level = $Level; Layers = $Layers; Mission = $Mission }
     'Record'  = [ordered]@{ File = (Join-Path $rec 'input.tdrec'); QuitAfter = 1; Seed = $Seed;
                             StopAfterFrames = $StopAfterFrames }
@@ -136,7 +136,10 @@ $(foreach ($sec in $sections.Keys) { "[$sec]"; foreach ($key in $sections[$sec].
     Set-Content -Encoding ASCII $ini
 if (-not $Asi) { $Asi = Join-Path $repo 'build\TeardownPhysX.asi' }
 Copy-Item $Asi $rec -Force
-& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $rec 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir
+# a pinned build brings its own GPU module (research\builds\<name>\PhysXGpu_64.dll), else build\'s
+$beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
+$gpuDll = if (Test-Path $beside) { $beside } else { '' }
+& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $rec 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
 try {
     $env:TDPX_INI = $ini
     $env:SteamAppId = '1167630'

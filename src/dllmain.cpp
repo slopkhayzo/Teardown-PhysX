@@ -1,6 +1,6 @@
-// TeardownPhysX.asi, loaded by Ultimate ASI Loader (installed as dxgi.dll).
-// Stage 0: a timing tracer for frames, physics, destruction/split work and the engine's own profiler categories,
-// the synthetic laser benchmark and input record/replay. See research/docs/physx-integration-plan.md.
+// TeardownPhysX.asi, loaded by Ultimate ASI Loader (installed as dxgi.dll): PhysX simulates the game's free debris
+// (src/px), fixes to the engine's destruction work (src/fix), and the development tools around them: a timing tracer,
+// benchmarks, input record/replay. See research/docs/physx-integration-plan.md.
 #include <windows.h>
 
 #include <MinHook.h>
@@ -13,6 +13,7 @@
 #include "core/config.h"
 #include "core/crash.h"
 #include "core/log.h"
+#include "core/version.h"
 #include "fix/overrides.h"
 #include "fix/serial_jobs.h"
 #include "hooks/hooks.h"
@@ -36,6 +37,8 @@ std::string ModuleDir() {
 
 std::string MakeRunDir() {
     if (!g_config.runDir.empty()) return g_config.runDir;
+    // not tracing: one folder, the last two sessions' logs (see InitializeASI)
+    if (!g_config.traceEnabled && g_config.outDir.empty()) return g_config.moduleDir + "\\TeardownPhysX_logs";
     std::string base = g_config.outDir.empty() ? g_config.moduleDir + "\\TeardownPhysX_runs" : g_config.outDir;
     char stamp[32];
     std::time_t t = std::time(nullptr);
@@ -83,7 +86,8 @@ DWORD WINAPI InitThread(void*) {
     // SteamStub decrypts .text shortly after start; hook only once the bytes we recorded are really there.
     for (int i = 0; i < 6000 && !EngineCodeMatches(); ++i) Sleep(10);
     if (!EngineCodeMatches()) {
-        LOG("engine code never matched the address table (other build, or still encrypted): engine hooks off");
+        LOG("the game's code doesn't match Teardown %s, the build this version of the plugin is made for (a game "
+            "update?): the plugin stays off and the game runs unmodified", td::kBuildVersion);
         return 0;
     }
     LOG("engine code decrypted; installing hooks");
@@ -109,12 +113,15 @@ extern "C" __declspec(dllexport) void InitializeASI() {
     DWORD n = GetEnvironmentVariableA("TDPX_INI", env, MAX_PATH);
     g_config.Load(n > 0 && n < MAX_PATH ? std::string(env) : g_config.moduleDir + "\\TeardownPhysX.ini");
 
+    const bool logsFolder = !g_config.traceEnabled && g_config.runDir.empty() && g_config.outDir.empty();
     g_runDir = MakeRunDir();
     g_config.runDir = g_runDir;  // the resolved folder, for everything that writes run output
     std::error_code ec;
     std::filesystem::create_directories(g_runDir, ec);
-    logx::Open((g_runDir + "\\plugin.log").c_str());
-    LOG("TeardownPhysX stage 0 (tracer + bench), ini %s", g_config.iniPath.c_str());
+    const std::string logPath = g_runDir + "\\plugin.log";
+    if (logsFolder) MoveFileExA(logPath.c_str(), (g_runDir + "\\plugin.prev.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    logx::Open(logPath.c_str());
+    LOG("TeardownPhysX %s for Teardown %s, ini %s", TDPX_VERSION, td::kBuildVersion, g_config.iniPath.c_str());
     LOG("run dir %s", g_runDir.c_str());
     crash::Install(g_runDir, g_config.hangKillSeconds);
     {

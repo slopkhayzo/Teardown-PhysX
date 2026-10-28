@@ -241,10 +241,63 @@ index c1aa211..df5292a 100644
  
  	mPostThirdPassTask.setContinuation(continuation);
 diff --git a/physx/source/simulationcontroller/src/ScScene.cpp b/physx/source/simulationcontroller/src/ScScene.cpp
-index 25d1614..fc3bb07 100644
+index 25d1614..88d610c 100644
 --- a/physx/source/simulationcontroller/src/ScScene.cpp
 +++ b/physx/source/simulationcontroller/src/ScScene.cpp
-@@ -3875,3 +3875,15 @@ void Sc::Scene::setActiveDeformableVolumeActors(PxActor** actors, PxU32 nbActors
+@@ -2054,8 +2054,52 @@ void Sc::Scene::fireTriggerCallbacks()
+ /*
+ Threading: called in the context of the user thread, but only after the physics thread has finished its run
+ */
++// TeardownPhysX: bodies the application had put to sleep that the solver moved, woken again (a running count, read by
++// the plugin)
++namespace physx
++{
++PxU32 gAppSleptMovedWakes = 0;
++}
++
++// TeardownPhysX: putToSleep() deactivates a body at once (no longer an active actor, no more events) but leaves its
++// node in the island, and the island sim keeps the island simulated while anything in it is not ready to sleep or an
++// active kinematic touches it. When the solver then moves the body (makes its node not ready), nothing reports it:
++// the application shows it where it was put to sleep while PhysX moves it on. cleanUpSleepBodies() undoes such a
++// failed request only for the bodies of this step's sleep list, and only when that list was invalidated. Here every
++// body whose node the island sim keeps active and not ready while the body is deactivated is woken again, before the
++// sleep and wake lists are reported (and the active actors built).
++static void wakeAppSleptBodiesTheSolverMoved(Sc::Scene& scene)
++{
++	const IG::IslandSim& islandSim = scene.getSimpleIslandManager()->getAccurateIslandSim();
++	const PxU32 nbActive = islandSim.getNbActiveNodes(IG::Node::eRIGID_BODY_TYPE);
++	if(!nbActive)
++		return;
++	const PxNodeIndex* const nodeIndices = islandSim.getActiveNodes(IG::Node::eRIGID_BODY_TYPE);
++	const PxU32 rigidBodyOffset = Sc::BodySim::getRigidBodyOffset();
++	PxArray<Sc::BodySim*> moved;	// waking one changes the island sim's node lists: collect them first
++	for(PxU32 i = 0; i < nbActive; i++)
++	{
++		const IG::Node& node = islandSim.getNode(nodeIndices[i]);
++		if(node.isReadyForSleeping() || node.isKinematic())
++			continue;
++		Sc::BodySim* body = reinterpret_cast<Sc::BodySim*>(reinterpret_cast<PxU8*>(getRigidBodyFromIG(islandSim, nodeIndices[i])) - rigidBodyOffset);
++		if(!body->isActive() && !body->isArticulationLink())
++			moved.pushBack(body);
++	}
++	for(PxU32 i = 0; i < moved.size(); i++)
++	{
++		// internalWakeUp() only raises a wake counter, and the solver gives a moving body up to the reset value and
++		// more with many contacts
++		const PxReal wakeCounter = moved[i]->getBodyCore().getWakeCounter();
++		moved[i]->internalWakeUp(PxMax(ScInternalWakeCounterResetValue, wakeCounter + 0.001f));
++	}
++	physx::gAppSleptMovedWakes += moved.size();
++}
++
+ void Sc::Scene::fireCallbacksPostSync()
+ {
++	wakeAppSleptBodiesTheSolverMoved(*this);	// TeardownPhysX
++
+ 	//
+ 	// Fire sleep & woken callbacks
+ 	//
+@@ -3875,3 +3919,15 @@ void Sc::Scene::setActiveDeformableVolumeActors(PxActor** actors, PxU32 nbActors
  
  #endif //PX_SUPPORT_GPU_PHYSX
  

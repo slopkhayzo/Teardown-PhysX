@@ -146,6 +146,7 @@ void RegisterName(uint32_t id, const char* name) {
 }
 
 void WriteMeta() {
+    if (g_runDir.empty()) return;  // not tracing
     std::string path = g_runDir + "\\meta.json";
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;

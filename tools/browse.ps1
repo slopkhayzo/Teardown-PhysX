@@ -7,6 +7,10 @@
 #
 #   browse.ps1 -Queue                          (through the shared queue: the game opens when the job's turn comes)
 #   browse.ps1 -Queue -Set 'PhysX.Gpu=0'       (other plugin settings, 'Section.Key=value;...' as in run_bench.ps1)
+#   browse.ps1 -InQueue -Player -Asi research\builds\<name>\TeardownPhysX.asi
+#       -Player: the plugin as players get it (tools\package\TeardownPhysX.ini on the plugin's own defaults: no debris
+#       tool unless -Set 'Tool.Enabled=1', no mod overrides); its log goes to <game>\TeardownPhysX_logs, as for a
+#       player, and is moved into the session folder afterwards. -Asi: the plugin build to play (profiles pin one).
 #
 # Output: research\browse\<date-time>\  plugin.log (the lines above are printed at the end), TeardownPhysX.ini, ...
 param(
@@ -15,11 +19,15 @@ param(
     [switch]$InQueue,
     [string]$Out = '',
     [string]$Set = '',
+    [switch]$Player,
+    [string]$Asi = '',
     [int]$TimeoutMinutes = 180,
     [string]$GameDir = 'D:\Program Files\Games\Steam\steamapps\common\Teardown'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+$playerLogs = Join-Path $GameDir 'TeardownPhysX_logs'
+if (-not $Asi) { $Asi = Join-Path $repo 'build\TeardownPhysX.asi' }
 $queueCmd = 'D:\Githubs\_agents\queue_executor\queue.ps1'
 if (-not $Out) { $Out = Join-Path $repo ('research\browse\' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 
@@ -27,7 +35,7 @@ if ($Queue) {
     New-Item -ItemType Directory -Force $Out | Out-Null
     $q = { param($s) "'" + ($s -replace "'", "''") + "'" }
     $cmd = "& $(& $q (Join-Path $PSScriptRoot 'browse.ps1')) -Out $(& $q $Out) -Set $(& $q $Set) " +
-           "-GameDir $(& $q $GameDir) -InQueue; " + 'exit $LASTEXITCODE'
+           "-Asi $(& $q $Asi) -GameDir $(& $q $GameDir) -InQueue$(if ($Player) { ' -Player' }); " + 'exit $LASTEXITCODE'
     $job = [ordered]@{
         name = 'Teardown play session (user at the keyboard): browse levels'
         owner = 'Teardown-PhysX'
@@ -44,6 +52,7 @@ if ($Queue) {
 }
 
 if (Get-Process -Name teardown -ErrorAction SilentlyContinue) { throw 'Close Teardown first.' }
+if ($Player -and (Test-Path $playerLogs)) { throw "$playerLogs exists (your own install?): not starting" }
 if (-not $InQueue -and -not $Force -and ((& $queueCmd status) -match '^RUNNING')) {
     throw "Another agent's queued test is running right now (queue.ps1 status); playing would disturb it. Use -Queue."
 }
@@ -64,16 +73,31 @@ $before = @{}
 foreach ($f in Get-ChildItem $real -File -Recurse -Force) { $before[$f.FullName] = (Get-FileHash $f.FullName).Hash }
 
 $ini = Join-Path $Out 'TeardownPhysX.ini'
-$sections = [ordered]@{
-    # no trace: an hour of it is gigabytes (plugin.log gets the frame rate every 10 s instead)
-    'Trace'   = [ordered]@{ Enabled = 0; RunDir = $Out; Label = 'browse' }
-    'Sandbox' = [ordered]@{ AppDataRoot = $live }
-    'Mods'    = [ordered]@{ Overrides = (Join-Path $repo 'research\mods\overrides') }
-    # you are at the keyboard: no hang watchdog (a minimized game may stop running frames)
-    'Session' = [ordered]@{ Mode = 'browse'; HangKillSeconds = 0 }
-    'PhysX'   = [ordered]@{ Shadow = 3; Gpu = 1 }
-    'Fix'     = [ordered]@{ KeepDebris = 1 }
-    'Tool'    = [ordered]@{ Enabled = 1 }
+if ($Player) {
+    # the shipped settings file; then the profile copy, and the main menu's free play
+    $sections = [ordered]@{}
+    $sec = ''
+    foreach ($line in Get-Content (Join-Path $PSScriptRoot 'package\TeardownPhysX.ini')) {
+        if ($line -match '^\s*\[(.+)\]\s*$') { $sec = $Matches[1]; $sections[$sec] = [ordered]@{}; continue }
+        if ($line -match '^\s*;' -or $line -notmatch '=') { continue }
+        $k, $v = $line -split '=', 2
+        $sections[$sec][$k.Trim()] = $v.Trim()
+    }
+    $sections['Sandbox'] = [ordered]@{ AppDataRoot = $live }
+    $sections['Session'] = [ordered]@{ Mode = 'browse' }
+} else {
+    $sections = [ordered]@{
+        # no trace: an hour of it is gigabytes (plugin.log gets the frame rate every 10 s instead)
+        'Trace'   = [ordered]@{ Enabled = 0; RunDir = $Out; Label = 'browse' }
+        'Sandbox' = [ordered]@{ AppDataRoot = $live }
+        'Mods'    = [ordered]@{ Overrides = (Join-Path $repo 'research\mods\overrides') }
+        # you are at the keyboard: no hang watchdog (a minimized game may stop running frames). Defaults=dev: the
+        # plugin's development defaults (the keys here override them).
+        'Session' = [ordered]@{ Defaults = 'dev'; Mode = 'browse'; HangKillSeconds = 0 }
+        'PhysX'   = [ordered]@{ Shadow = 3; Gpu = 1; LogEvery = 60 }
+        'Fix'     = [ordered]@{ KeepDebris = 1 }
+        'Tool'    = [ordered]@{ Enabled = 1 }
+    }
 }
 foreach ($kv in ($Set -split ';' | Where-Object { $_ -match '=' })) {
     $k, $v = $kv -split '=', 2
@@ -83,19 +107,28 @@ foreach ($kv in ($Set -split ';' | Where-Object { $_ -match '=' })) {
 }
 $(foreach ($sec in $sections.Keys) { "[$sec]"; foreach ($key in $sections[$sec].Keys) { "$key=$($sections[$sec][$key])" } }) |
     Set-Content -Encoding ASCII $ini
-Copy-Item (Join-Path $repo 'build\TeardownPhysX.asi') $Out -Force
-& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $Out 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir
+Copy-Item $Asi $Out -Force
+# a pinned build brings its own GPU module (research\builds\<name>\PhysXGpu_64.dll), else build\'s
+$beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
+$gpuDll = if (Test-Path $beside) { $beside } else { '' }
+& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $Out 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
 try {
     $env:TDPX_INI = $ini
     $env:SteamAppId = '1167630'
     $env:SteamGameId = '1167630'
-    Write-Output 'Starting Teardown at its main menu. Middle mouse: cut what you aim at. Quit the game to end the session.'
+    $toolOn = $sections.Contains('Tool') -and "$($sections['Tool']['Enabled'])" -eq '1'
+    $tool = if ($toolOn) { ' Middle mouse: cut what you aim at.' } else { '' }
+    Write-Output "Starting Teardown at its main menu.$tool Quit the game to end the session."
     $p = Start-Process -FilePath (Join-Path $GameDir 'teardown.exe') -WorkingDirectory $GameDir -PassThru
     $p.WaitForExit()
     while (Get-Process -Name teardown -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }
 }
 finally {
     & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
+    if ($Player -and (Test-Path $playerLogs)) {  # the plugin's own log folder, as a player's game gets it
+        Get-ChildItem $playerLogs -File | ForEach-Object { Move-Item $_.FullName $Out -Force }
+        Remove-Item $playerLogs -Recurse -Force
+    }
 }
 $changed = @(foreach ($f in Get-ChildItem $real -File -Recurse -Force) {
     if ($before[$f.FullName] -ne (Get-FileHash $f.FullName).Hash) { $f.FullName }

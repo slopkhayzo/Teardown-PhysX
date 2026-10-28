@@ -6,7 +6,12 @@
 #   run_bench.ps1 -Label lee_laser [-Mission lee_sandbox -Level lee.xml -Layers sandbox]
 #                 [-Mod steam-2658944037 -Level vertigo.xml -Layers 'sunny sandbox tspawn'] (workshop level)
 #                 [-Duration 45] [-HolesPerSecond 20] [-Smoke [-SmokeSeconds 40]] [-Set 'Bench.R0=2;Bench.Sound=0']
-#                 [-TimeoutSec 420] [-GpuLog]
+#                 [-TimeoutSec 420] [-GpuLog] [-Asi research\builds\<name>\TeardownPhysX.asi]
+# -Asi: the plugin build to run (default build\TeardownPhysX.asi; its .pdb and .map are taken from beside it).
+# -Player: the plugin as players get it: the settings of tools\package\TeardownPhysX.ini on the plugin's own defaults
+#          (no [Session] Defaults=dev), no tracing, plugin.log in <game>\TeardownPhysX_logs (moved into the run folder
+#          afterwards). The sandbox, level and replay keys and -Set are added as usual. -NoGpuDll: install no
+#          PhysXGpu_64.dll (PhysX then runs on the CPU, as without an NVIDIA GPU).
 # -Smoke: no benchmark; start the game, let it sit in the main menu for SmokeSeconds, then kill it.
 # -GpuLog: sample the GPU (nvidia-smi, no admin rights needed) every 100 ms into <run>\gpu.csv; seconds are
 #          counted from the game's start (<run>\gpu_t0.txt), like the trace report's timeline.
@@ -35,6 +40,9 @@ param(
     [switch]$GpuLog,
     # benchmarks: mods to enable in the sandbox's mod list, 'id;id' (e.g. 'local-zenitka-copy'); replays keep theirs
     [string]$Mods = '',
+    [string]$Asi = '',
+    [switch]$Player,
+    [switch]$NoGpuDll,
     [string]$GameDir = 'D:\Program Files\Games\Steam\steamapps\common\Teardown'
 )
 $ErrorActionPreference = 'Stop'
@@ -42,6 +50,8 @@ $repo = Split-Path -Parent $PSScriptRoot
 $python = 'C:\Python\312\python.exe'
 
 if (Get-Process -Name teardown -ErrorAction SilentlyContinue) { throw 'teardown.exe is already running (someone playing?): not starting' }
+$playerLogs = Join-Path $GameDir 'TeardownPhysX_logs'
+if ($Player -and (Test-Path $playerLogs)) { throw "$playerLogs exists (someone's own install?): not starting" }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $run = if ($RunDir) { $RunDir } else { Join-Path $repo "research\runs\$stamp-$Label" }
@@ -88,16 +98,30 @@ if ($Replay) {
 }
 
 $mode = if ($Replay) { 'replay' } elseif ($Smoke) { 'none' } else { 'bench' }
-$ini = [ordered]@{
-    'Trace'   = [ordered]@{ Enabled = 1; RunDir = $run; Label = $Label }
-    'Sandbox' = [ordered]@{ AppDataRoot = $sandbox }
-    # optimized copies of mod files (research\mods); -Set 'Mods.Overrides=' runs the mods as published
-    'Mods'    = [ordered]@{ Overrides = (Join-Path $repo 'research\mods\overrides') }
-    'Session' = [ordered]@{ Mode = $mode }
-    'Level'   = [ordered]@{ Mod = $Mod; Mission = $Mission; Level = $Level; Layers = $Layers }
-    'Bench'   = [ordered]@{ Enabled = [int]($mode -eq 'bench'); DurationSeconds = $Duration;
-                            HolesPerSecond = $HolesPerSecond; QuitWhenDone = 1 }
+if ($Player) {
+    # the shipped settings file, then what an unattended sandboxed run needs (hung levels still end it)
+    $ini = [ordered]@{}
+    $sec = ''
+    foreach ($line in Get-Content (Join-Path $PSScriptRoot 'package\TeardownPhysX.ini')) {
+        if ($line -match '^\s*\[(.+)\]\s*$') { $sec = $Matches[1]; $ini[$sec] = [ordered]@{}; continue }
+        if ($line -match '^\s*;' -or $line -notmatch '=') { continue }
+        $k, $v = $line -split '=', 2
+        $ini[$sec][$k.Trim()] = $v.Trim()
+    }
+    $ini['Sandbox'] = [ordered]@{ AppDataRoot = $sandbox }
+    $ini['Session'] = [ordered]@{ Mode = $mode; HangKillSeconds = 30 }
+} else {
+    $ini = [ordered]@{
+        'Trace'   = [ordered]@{ Enabled = 1; RunDir = $run; Label = $Label }
+        'Sandbox' = [ordered]@{ AppDataRoot = $sandbox }
+        # optimized copies of mod files (research\mods); -Set 'Mods.Overrides=' runs the mods as published
+        'Mods'    = [ordered]@{ Overrides = (Join-Path $repo 'research\mods\overrides') }
+        'Session' = [ordered]@{ Defaults = 'dev'; Mode = $mode }  # Defaults=dev: the plugin's development defaults
+    }
 }
+$ini['Level'] = [ordered]@{ Mod = $Mod; Mission = $Mission; Level = $Level; Layers = $Layers }
+$ini['Bench'] = [ordered]@{ Enabled = [int]($mode -eq 'bench'); DurationSeconds = $Duration;
+                            HolesPerSecond = $HolesPerSecond; QuitWhenDone = 1 }
 if ($Replay) {
     $file = if ($ReplayFile) { $ReplayFile } else { Join-Path $recDir 'input.tdrec' }
     $ini['Replay'] = [ordered]@{ File = $file; StopAtPause = 1 }
@@ -113,11 +137,17 @@ $iniPath = Join-Path $run 'TeardownPhysX.ini'
 $lines = foreach ($sec in $ini.Keys) { "[$sec]"; foreach ($key in $ini[$sec].Keys) { "$key=$($ini[$sec][$key])" } }
 $lines | Set-Content -Encoding ASCII $iniPath
 
-Copy-Item (Join-Path $repo 'build\TeardownPhysX.asi') $run
-if (Test-Path (Join-Path $repo 'build\TeardownPhysX.pdb')) { Copy-Item (Join-Path $repo 'build\TeardownPhysX.pdb') $run }
-if (Test-Path (Join-Path $repo 'build\TeardownPhysX.map')) { Copy-Item (Join-Path $repo 'build\TeardownPhysX.map') $run }
+if (-not $Asi) { $Asi = Join-Path $repo 'build\TeardownPhysX.asi' }
+Copy-Item $Asi $run
+foreach ($ext in 'pdb', 'map') {
+    $side = [IO.Path]::ChangeExtension($Asi, $ext)
+    if (Test-Path $side) { Copy-Item $side $run }
+}
 
-& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $run 'TeardownPhysX.asi') -Ini $iniPath -GameDir $GameDir
+# a pinned build brings its own GPU module (research\builds\<name>\PhysXGpu_64.dll), else build\'s
+$beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
+$gpuDll = if ($NoGpuDll) { 'none' } elseif (Test-Path $beside) { $beside } else { '' }
+& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $run 'TeardownPhysX.asi') -Ini $iniPath -GameDir $GameDir -GpuDll $gpuDll
 $exitCode = 0
 $gpu = $null
 try {
@@ -150,6 +180,10 @@ finally {
     if ($gpu) { Stop-Process -Id $gpu.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
     & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
+    if ($Player -and (Test-Path $playerLogs)) {  # the plugin's own log folder, as a player's game gets it
+        Get-ChildItem $playerLogs -File | ForEach-Object { Move-Item $_.FullName $run -Force }
+        Remove-Item $playerLogs -Recurse -Force
+    }
     $gameLog = Join-Path $dst 'log.txt'
     if (Test-Path $gameLog) { Copy-Item $gameLog (Join-Path $run 'game.log') }
 

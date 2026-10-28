@@ -3070,6 +3070,9 @@ void LogAwakeKinematics(const PxBounds3& slept, uint32_t count) {
 // gSleepDebugMinNodes bodies stayed awake in the last step ([PhysX] DebugIslands).
 namespace physx {
 PxActor* PxDebugActorOfRigid(const void* rigid);
+// Our PhysX build wakes a body put to sleep that its solver moved on because its island stayed active (ScScene.cpp,
+// wakeAppSleptBodiesTheSolverMoved): a running count.
+extern PxU32 gAppSleptMovedWakes;
 namespace IG {
 struct SleepDebugInfo {  // as in PxsIslandSim.cpp
     PxU32 islandNodes, reason, notReady;
@@ -4016,6 +4019,9 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
         LOG("offload bodies PhysX moved, per tick by speed: <5 cm/s %.0f, 5-20 cm/s %.0f, 0.2-1 m/s %.0f, faster %.0f",
             double(h[0]) / n, double(h[1]) / n, double(h[2]) / n, double(h[3]) / n);
         for (uint64_t& c : g_speedHist) c = 0;
+        static PxU32 solverWokeMark = 0;
+        const PxU32 solverWoke = physx::gAppSleptMovedWakes - solverWokeMark;
+        solverWokeMark = physx::gAppSleptMovedWakes;
         char movers[2048];
         int len = 0;
         movers[0] = 0;
@@ -4087,7 +4093,8 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
             "%u put to sleep, %u not, the largest awake %u pieces, %u of them moving, %u held back, the fastest %.2f "
             "m/s and %.1f cm on; %llu large pieces joined by their bounds, %llu without bounds; %.1f ms, at most "
             "%.1f); %llu woke again in the step after a check (%llu put to sleep again at once), %llu held back, "
-            "%llu woken by the game's step; the player stood on owned debris %llu ticks (its weight on it %llu); "
+            "%llu woken by the game's step, %u woken back by PhysX (its solver moved them asleep); the player stood on "
+            "owned debris %llu ticks (its weight on it %llu); "
             "%zu frozen (%llu froze, %llu thawed, %zu queued, %llu no longer settled at their turn, %llu failed; "
             "settle checks looked at %llu, %llu settled long enough; thaw boxes from %llu movers, %llu proxies, %llu "
             "player, %llu impulses); %llu builds deferred; %llu pieces launched (+25 m/s in a step) since start; fastest "
@@ -4098,7 +4105,7 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
             g_clustersLoudWin,
             g_largestLoudWin, g_largestLoudMovers, g_largestLoudHeld, g_largestLoudSpeed, 100.0f * g_largestLoudMoved,
             g_settleLargeWin, g_settleLoneWin, g_settleMsWin, g_settleMaxMsWin, g_settleRewokeWin, g_settleRetriedWin,
-            g_settleHeldWin, g_gameWokeWin, g_playerGroundWin, g_playerWeightWin, g_frozenCount, g_freezes,
+            g_settleHeldWin, g_gameWokeWin, solverWoke, g_playerGroundWin, g_playerWeightWin, g_frozenCount, g_freezes,
             g_thaws, g_freezeQueue.size(), g_freezeUnsettled, g_freezeFailed, g_settleLooked, g_settleLong,
             g_thawBoxesBy[kThawMover], g_thawBoxesBy[kThawProxy], g_thawBoxesBy[kThawPlayer],
             g_thawBoxesBy[kThawImpulse], g_buildsDeferred, g_launches, movers[0] ? movers : "none");
@@ -4400,7 +4407,7 @@ bool Start() {
     g_offAll = OffStats{};
     for (Divergence& d : g_divAll) d = Divergence{};
     for (Divergence& d : g_div) d = Divergence{};
-    if (!g_csv) {
+    if (!g_csv && g_config.traceEnabled) {  // (players: plugin.log only)
         g_csv = std::fopen((g_config.runDir + "\\shadow.csv").c_str(), "w");
         if (g_csv)
             std::fputs("tick,bodies,awake,proxies,boxes,static_shapes,blocks,block_boxes,native_ms,native_max_ms,"
@@ -4410,7 +4417,7 @@ bool Start() {
                        "free_dv,woken_by_physx\n",
                        g_csv);
     }
-    if (g_offload && !g_offCsv) {
+    if (g_offload && !g_offCsv && g_config.traceEnabled) {
         g_offCsv = std::fopen((g_config.runDir + "\\offload.csv").c_str(), "w");
         if (g_offCsv)
             std::fputs("tick,owned,awake,proxies,waiting,takeovers,hand_backs,hb_held,hb_not_free,hb_vehicle,"

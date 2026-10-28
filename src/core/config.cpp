@@ -24,6 +24,14 @@ static bool ReadBool(const std::string& ini, const char* sec, const char* key, b
 
 void Config::Load(const std::string& path) {
     iniPath = path;
+    // the development defaults, which the test and benchmark scripts were written against (the keys below override)
+    if (ReadStr(path, "Session", "Defaults", "") == "dev") {
+        traceEnabled = true;
+        hangKillSeconds = 30;
+        pxShadow = 0;
+        pxGpu = false;
+        keepDebris = false;
+    }
     traceEnabled = ReadBool(path, "Trace", "Enabled", traceEnabled);
     outDir = ReadStr(path, "Trace", "OutDir", outDir);
     runDir = ReadStr(path, "Trace", "RunDir", runDir);
@@ -131,6 +139,7 @@ void Config::Load(const std::string& path) {
     pxRestitution = float(ReadNum(path, "PhysX", "Restitution", pxRestitution));
     pxTgs = ReadBool(path, "PhysX", "TGS", pxTgs);
     pxLogEvery = int(ReadNum(path, "PhysX", "LogEvery", pxLogEvery));
+    if (pxLogEvery <= 0) pxLogEvery = traceEnabled ? 60 : 3600;  // a report a second while tracing, else a minute
     {
         std::string d = ReadStr(path, "PhysX", "DumpTicks", "");
         if (std::sscanf(d.c_str(), "%d-%d", &pxDumpFrom, &pxDumpTo) != 2) pxDumpFrom = pxDumpTo = -1;

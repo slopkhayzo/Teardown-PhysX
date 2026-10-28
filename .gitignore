@@ -1,8 +1,9 @@
 # Research material (reverse-engineering notes, recordings, runs, mod overrides, tools): local only for now
 /research/
 
-# Build output
+# Build output (dist: tools\package.ps1's release packages)
 /build/
+/dist/
 /third_party/physx-build/
 
 # Third-party binaries (see README.md)

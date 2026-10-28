@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(TeardownPhysX LANGUAGES C CXX ASM_MASM)
+project(TeardownPhysX LANGUAGES C CXX ASM_MASM RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,7 +60,8 @@ add_library(TeardownPhysX SHARED
     src/input/recorder.cpp
     src/px/colliders.cpp
     src/px/world.cpp
-    src/px/shadow.cpp)
+    src/px/shadow.cpp
+    src/version.rc)
 target_include_directories(TeardownPhysX PRIVATE src)
 # CUPTI (CUDA toolkit) for the GPU kernel timer ([Trace] GpuKernels): headers only, the DLL is loaded at run time
 set(TDPX_CUDA_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8" CACHE PATH "CUDA toolkit with CUPTI")
