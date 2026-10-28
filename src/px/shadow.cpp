@@ -170,6 +170,10 @@ struct BodyEntry {
     // keep their whole island awake): where it was a second ago
     PxVec3 anchor{0.0f};
     uint32_t anchorTick = 0;
+    PxVec3 anchor5{0.0f};  // where it was at the start of the current ~5 s (does it get anywhere, or only shake?)
+    uint32_t anchor5Tick = 0;
+    PxVec3 anchorOld{0.0f};  // and at the start of the ~5 s before (for the checks right after a new start)
+    uint32_t anchorOldTick = 0;
     uint8_t stuck = 0;  // settle checks in a row it got nowhere
     // whether putting it to sleep lasts (its island has a piece that wasn't put to sleep, or something keeps waking
     // it: the player walking on the pile, a proxy)
@@ -349,6 +353,7 @@ std::atomic<uint64_t> g_heldWakes{0};   // HkPlayerConstraints: held bodies woke
 uint64_t g_droppedConstraints = 0;      // HkSolverIslands: constraints left out of a step
 PxRigidDynamic* g_player = nullptr;                 // kinematic capsule
 uint32_t g_playerMovedTick = 0;                     // it last moved (wakes what it touches, and their islands)
+PxVec3 g_playerAnchor(0.0f);                         // where it last moved (UpdatePlayer: jiggles)
 OffStats g_off, g_offAll;
 FILE* g_offCsv = nullptr;
 // Where the prepare time goes (offload scan), in TSC cycles per report window: cheap enough to keep on.
@@ -371,6 +376,10 @@ uint64_t g_speedHist[4] = {};  // write-backs this window by speed: <5 cm/s, <20
 uint64_t g_proxyMovesWin = 0, g_proxyHeldWin = 0, g_writeRestWin = 0;  // moved / held by the deadbands
 uint64_t g_proxyJiggleWin = 0;  // proxies moved without waking anything (SyncProxy)
 uint64_t g_gameWokeWin = 0;     // owned bodies the game's step woke (AfterNativeStep), so PhysX's too
+// PlayerGround: the owned piece the player stood on in the step (HkNarrowWake), and per report window the ticks the
+// player stood on owned debris, and those its weight pressed on it in PhysX
+std::atomic<uint8_t*> g_playerGround{nullptr};
+uint64_t g_playerGroundWin = 0, g_playerWeightWin = 0;
 uint64_t g_wedgedWin = 0, g_wedgedAll = 0;  // pieces put to sleep by the settle check
 uint32_t g_settleLast = 0, g_settleNext = 0;  // ticks of the last and the next settle check
 uint32_t g_sleptAt = 0;  // a check that put pieces to sleep, until the step after it shows which woke again at once
@@ -2668,10 +2677,31 @@ void AfterNativeStep(bool defer) {
         restore(0, owned.size());  // PhysX's threads are busy with its step
     else
         px::ParallelFor(owned.size(), 256, restore);
+    // The piece the player stands on (PlayerGround): the player's constraints woke it natively, every tick the player
+    // stands there; restore put it back to sleep. Not a wake for PhysX (below), so a pile at rest stays asleep under
+    // the player. While PhysX has the piece moving, the player's weight presses on it (no wake either).
+    uint8_t* ground = g_playerGround.exchange(nullptr, std::memory_order_relaxed);
+    if (ground) {
+        auto git = g_owned.find(ground);
+        if (git == g_owned.end()) {
+            ground = nullptr;
+        } else {
+            BodyEntry& ge = *git->second;
+            ++g_playerGroundWin;
+            uint8_t* p = td::LocalPlayer();
+            if (!defer && p && g_config.pxPlayerWeight > 0.0f && ge.actor && !ge.kinematic && !ge.actor->isSleeping()) {
+                const float* feet = &td::At<float>(p, 0x570);
+                PxRigidBodyExt::addForceAtPos(*ge.actor, PxVec3(0.0f, -9.81f * g_config.pxPlayerWeight, 0.0f),
+                                              PxVec3(feet[0], feet[1], feet[2]), PxForceMode::eFORCE, false);
+                ++g_playerWeightWin;
+            }
+        }
+    }
     static int diagImpulses = 0;
     for (uint32_t fi = 0, nf = nflagged.load(); fi < nf; ++fi) {
         auto& [b, e] = owned[flagged[fi]];
-        if (!defer && (e->stepImpulse || e->stepWoken)) {
+        const bool woke = e->stepWoken && b != ground;  // (the piece under the player: see above)
+        if (!defer && (e->stepImpulse || woke)) {
             Thaw(*e);
             if (e->stepImpulse) ThawAround(e->bounds, V(e->fwdDv).magnitude(), kThawImpulse);
         }
@@ -2701,8 +2731,8 @@ void AfterNativeStep(bool defer) {
             }
             ++g_off.stepDv;
         }
-        if (e->stepWoken) {
-            UpdateShapes(b);  // back into the sleeping-body trees
+        if (e->stepWoken) UpdateShapes(b);  // back into the sleeping-body trees
+        if (woke) {
             // diagnostics: one the settle check just put to sleep (a whole pile woke again at once in Volkograd)
             static int logged = 0;
             if (e->sleptTick != 0 && e->sleptTick == g_sleptAt && logged < 20) {
@@ -2867,14 +2897,26 @@ void UpdatePlayer() {
                                                            *px::Material(), PxShapeFlag::eSIMULATION_SHAPE);
         if (s) s->setLocalPose(PxTransform(PxQuat(PxHalfPi, PxVec3(0.0f, 0.0f, 1.0f))));  // PhysX capsules lie along x
         px::Scene()->addActor(*g_player);
+        g_playerAnchor = pose.p;
         return;
     }
+    // A kinematic given a target wakes the island it touches (a whole pile under the player) and keeps it awake. So
+    // standing still (no target), or only jiggling: a player standing on debris moves a few mm now and then (in a
+    // replay, as much as the debris did under it when recorded), which leaves the capsule within kPlayerJiggle of where
+    // it last moved for real; it is put there without waking anything.
+    constexpr float kPlayerJiggle = 0.03f;
     const float moved = (g_player->getGlobalPose().p - pose.p).magnitude();
-    if (moved > 0.001f) g_playerMovedTick = g_tick;
-    if (moved > 2.0f)
+    if (moved <= 0.001f) return;
+    if (moved > 2.0f) {
         g_player->setGlobalPose(pose);
-    else if (moved > 0.001f)  // standing still: no target (a kinematic given one wakes what it touches, every step)
+    } else if ((pose.p - g_playerAnchor).magnitude() < kPlayerJiggle) {
+        g_player->setGlobalPose(pose, false);
+        return;
+    } else {
         g_player->setKinematicTarget(pose);
+    }
+    g_playerAnchor = pose.p;
+    g_playerMovedTick = g_tick;
 }
 
 // PhysX's result into the body: pose (also as the predicted pose, so nothing sweeps), velocities, then the
@@ -2945,14 +2987,17 @@ struct SettleItem {
     PxBounds3 bounds;
     float speed, moved;  // fastest since the last check (m/s); how far its centre got (m)
     bool quiet;          // still or slow at the last two checks
+    float drift;         // how fast its centre got anywhere over the last ~5 s (m/s; -1: not known yet)
 };
 std::vector<SettleItem> g_settleItems;
 
 // A piece the settle check puts to sleep (its next write-back tells whether that lasted: sleptTick)
+uint32_t g_sleptCount = 0;  // pieces put to sleep since the last write-back
 void SettleSleep(BodyEntry& e) {
     e.actor->putToSleep();
     e.physxAwake = false;
     e.sleptTick = g_tick;
+    ++g_sleptCount;
 }
 constexpr uint32_t kSettleLoudShare = 100;  // 1 in this many of a group may still move
 constexpr float kSettleLoudSpeed = 1.5f;    // if none of those went faster than this (m/s)
@@ -2973,10 +3018,15 @@ int SettleRoot(std::vector<int>& parent, int i) {
 
 double g_settleMsWin = 0.0, g_settleMaxMsWin = 0.0;  // the group pass itself
 void SettleClustersImpl();
+struct Overlaps {  // MeasureOverlaps (diagnostics)
+    float statics = 0.0f, debris = 0.0f, proxies = 0.0f;  // deepest overlap, metres
+    int staticPairs = 0, debrisPairs = 0, proxyPairs = 0;  // pairs overlapping by more than 1 mm
+    int staleBlocks = 0;  // overlapped static blocks whose voxels changed since they were built
+};
+Overlaps MeasureOverlaps(PxRigidDynamic* a);
 
-// Diagnostics (a big group was just put to sleep): kinematic actors PhysX has awake now. One touching the group keeps
-// its contacts with the sleeping pieces alive for the next step, and a contact found or lost there wakes the whole
-// island again (PhysX's lost-touch and active-kinematic wake rules).
+// Diagnostics (a big group was just put to sleep): kinematic actors PhysX has awake now (one touching the group would
+// wake it again; in Volkograd none was, and a pile with no kinematic contacts at all woke again as well).
 void LogAwakeKinematics(const PxBounds3& slept, uint32_t count) {
     static int logged = 0;
     if (logged >= 30) return;
@@ -3012,6 +3062,232 @@ void LogAwakeKinematics(const PxBounds3& slept, uint32_t count) {
         "them: %s), player capsule %s (moved %u ticks ago)",
         g_tick, count, awake, touching, list[0] ? list : "none", playerAwake ? "awake" : "asleep",
         g_tick - g_playerMovedTick);
+}
+}  // namespace
+}  // namespace shadow
+
+// Diagnostics in our PhysX build (third_party/patches): its island sim records why the biggest island of at least
+// gSleepDebugMinNodes bodies stayed awake in the last step ([PhysX] DebugIslands).
+namespace physx {
+PxActor* PxDebugActorOfRigid(const void* rigid);
+namespace IG {
+struct SleepDebugInfo {  // as in PxsIslandSim.cpp
+    PxU32 islandNodes, reason, notReady;
+    const void* object;
+    PxU32 flags;
+    PxReal wakeCounter, solverWakeCounter, speed;
+};
+extern PxU32 gSleepDebugMinNodes;
+extern SleepDebugInfo gSleepDebugInfo[2];  // [0] the accurate island sim (bodies), [1] the speculative one (pairs)
+extern void (*gActivateDebugHook)(const void* rigid, PxReal wakeCounter);  // a body ready to sleep no longer is
+extern PxU32 gWakeDebugCount[4];  // big sleeping islands woken, by cause (see PxsIslandSim.cpp)
+extern const void* gWakeDebugObject[4];
+}  // namespace IG
+}  // namespace physx
+
+namespace shadow {
+namespace {
+
+// What makes bodies that were ready to sleep unready between a settle check that put many to sleep and the next
+// write-back ([PhysX] DebugIslands; PhysX's own logic or ours): the call stacks are logged as module offsets (map them
+// with the build's .map file). CPU pipeline only: the GPU solver's own wakes bypass the hook.
+struct WakeRecord {
+    uint8_t* body;  // the game body (the actor's userData)
+    float wakeCounter;
+    USHORT n;
+    void* frames[16];
+};
+constexpr uint32_t kWakeRecords = 4096;
+WakeRecord g_wakeRecords[kWakeRecords];
+std::atomic<uint32_t> g_wakeCount{0};
+std::atomic<bool> g_wakeArmed{false};
+
+void WakeHook(const void* rigid, PxReal wakeCounter) {
+    if (!g_wakeArmed.load(std::memory_order_relaxed)) return;
+    const uint32_t i = g_wakeCount.fetch_add(1, std::memory_order_relaxed);
+    if (i >= kWakeRecords) return;
+    WakeRecord& r = g_wakeRecords[i];
+    PxActor* a = physx::PxDebugActorOfRigid(rigid);
+    r.body = a ? static_cast<uint8_t*>(a->userData) : nullptr;
+    r.wakeCounter = wakeCounter;
+    r.n = RtlCaptureStackBackTrace(1, 16, r.frames, nullptr);
+}
+
+void ArmWakeDebug() {
+    g_wakeCount.store(0, std::memory_order_relaxed);
+    g_wakeArmed.store(true, std::memory_order_release);
+}
+
+int FrameName(void* addr, char* out, size_t size) {
+    HMODULE mod = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(addr), &mod) &&
+        GetModuleFileNameA(mod, name, MAX_PATH)) {
+        const char* slash = std::strrchr(name, '\\');
+        return std::snprintf(out, size, "%s+%#llx", slash ? slash + 1 : name,
+                             static_cast<unsigned long long>(static_cast<uint8_t*>(addr) - reinterpret_cast<uint8_t*>(mod)));
+    }
+    return std::snprintf(out, size, "%p", addr);
+}
+
+void LogWakeDebug(uint32_t verify) {
+    g_wakeArmed.store(false, std::memory_order_release);
+    static int logged = 0;
+    const uint32_t total = g_wakeCount.load(), n = std::min(total, kWakeRecords);
+    if (logged >= 40) return;
+    ++logged;
+    // stacks grouped by their frames; how many of the bodies were put to sleep at the check
+    struct Group {
+        uint32_t first, count, ours;
+    };
+    std::vector<Group> groups;
+    uint32_t ours = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const WakeRecord& r = g_wakeRecords[i];
+        auto it = r.body ? g_bodies.find(r.body) : g_bodies.end();
+        const bool slept = it != g_bodies.end() && it->second.sleptTick == verify;
+        ours += slept;
+        bool found = false;
+        for (Group& g : groups) {
+            const WakeRecord& f = g_wakeRecords[g.first];
+            if (f.n == r.n && std::memcmp(f.frames, r.frames, sizeof(void*) * r.n) == 0) {
+                ++g.count;
+                g.ours += slept;
+                found = true;
+                break;
+            }
+        }
+        if (!found) groups.push_back({i, 1, slept ? 1u : 0u});
+    }
+    std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
+        return a.ours != b.ours ? a.ours > b.ours : a.count > b.count;
+    });
+    LOG("offload wake diag: tick %u: %u bodies ready to sleep made unready since the check (%u of the recorded %u were "
+        "put to sleep there), %zu different stacks",
+        g_tick, total, ours, n, groups.size());
+    for (size_t k = 0; k < groups.size() && k < 8; ++k) {
+        const WakeRecord& r = g_wakeRecords[groups[k].first];
+        char line[2048];
+        int len = 0;
+        for (USHORT f = 0; f < r.n && len < int(sizeof(line)) - 64; ++f) {
+            if (f) len += std::snprintf(line + len, sizeof(line) - size_t(len), " < ");
+            len += FrameName(r.frames[f], line + len, sizeof(line) - size_t(len));
+        }
+        LOG("offload wake diag:   %u (%u put to sleep at the check; wake counter %.3f): %s", groups[k].count,
+            groups[k].ours, r.wakeCounter, line);
+    }
+}
+
+// A low-level PhysX body (an island node's object) for the diagnostics' log lines. It may be one released since PhysX
+// saw it: the actor is only used once found among ours.
+void DescribeRigid(const void* rigid, uint32_t verify, char* out, size_t size) {
+    PxActor* a = physx::PxDebugActorOfRigid(rigid);  // (pointer arithmetic only)
+    uint8_t* b = nullptr;
+    const BodyEntry* e = nullptr;
+    bool live = a && a == g_player;
+    for (auto it = g_bodies.begin(); a && !live && it != g_bodies.end(); ++it) {
+        live = it->second.actor == a;
+        for (const BodyEntry::Part& p : it->second.parts) live |= p.actor == a;
+        if (live) b = it->first, e = &it->second;
+    }
+    if (!live) {
+        std::snprintf(out, size, a ? "a body no longer in the scene" : "unknown");
+        return;
+    }
+    PxRigidDynamic* rd = a->is<PxRigidDynamic>();
+    const bool kin = rd && (rd->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC);
+    const PxVec3 p = rd ? rd->getGlobalPose().p : PxVec3(0.0f);
+    char whose[160];
+    if (a == g_player)
+        std::snprintf(whose, sizeof(whose), "the player capsule, moved %u ticks ago", g_tick - g_playerMovedTick);
+    else if (e && e->kinematic)
+        std::snprintf(whose, sizeof(whose), "a proxy, %u voxels, moved %u ticks ago, natively %s", e->voxels,
+                      g_tick - e->movedTick, BodyAwake(b) ? "awake" : "asleep");
+    else
+        std::snprintf(whose, sizeof(whose), "%s, %u voxels", !e ? "untracked" : e->owned ? "owned" : "tracked",
+                      e ? e->voxels : 0);
+    std::snprintf(out, size, "%s body %d (%s, at (%.1f, %.1f, %.1f); now %s, %.2f m/s, wake counter %.2f; %s)",
+                  kin ? "kinematic" : "dynamic", b ? Handle(b) : 0, whose, p.x, p.y, p.z,
+                  rd && rd->isSleeping() ? "asleep" : "awake", rd ? rd->getLinearVelocity().magnitude() : 0.0f,
+                  rd && !kin ? rd->getWakeCounter() : 0.0f,
+                  e && verify && e->sleptTick == verify ? "put to sleep at the check"
+                  : e && e->sleptTick                   ? "put to sleep earlier"
+                                                        : "not put to sleep");
+}
+
+// Right after a step ([PhysX] DebugIslands): the big sleeping islands PhysX woke in it, by cause. One woken goes back
+// to sleep at once if nothing in it moves, but costs the whole island's activation (its contact pairs made anew).
+void LogIslandWakes() {
+    using namespace physx::IG;
+    const uint32_t total = gWakeDebugCount[0] + gWakeDebugCount[1] + gWakeDebugCount[2] + gWakeDebugCount[3];
+    if (!total) return;
+    static int logged = 0;
+    if (logged < 300) {
+        ++logged;
+        char what[4][400];
+        for (int c = 0; c < 4; ++c)
+            if (gWakeDebugCount[c])
+                DescribeRigid(gWakeDebugObject[c], 0, what[c], sizeof(what[c]));
+            else
+                std::snprintf(what[c], sizeof(what[c]), "-");
+        LOG("offload island diag: tick %u: sleeping islands of %u bodies or more woken: %u by a body of theirs (the "
+            "last: %s); %u by a kinematic touching them waking up (the last: %s); %u by a new contact with an active "
+            "kinematic (the last: %s); %u by a new contact with an awake body or island (the last: %s)",
+            g_tick, gSleepDebugMinNodes, gWakeDebugCount[0], what[0], gWakeDebugCount[1], what[1], gWakeDebugCount[2],
+            what[2], gWakeDebugCount[3], what[3]);
+    }
+    for (int c = 0; c < 4; ++c) {
+        gWakeDebugCount[c] = 0;
+        gWakeDebugObject[c] = nullptr;
+    }
+}
+
+// Why one of PhysX's island sims kept its biggest island awake in the last step.
+void DescribeIsland(const physx::IG::SleepDebugInfo& d, uint32_t verify, char* out, size_t size) {
+    char what[512];
+    DescribeRigid(d.object, verify, what, sizeof(what));
+    std::snprintf(out, size,
+                  "an island of %u bodies (%s); %u of its bodies not ready to sleep, the first: %s; node flags %#x, wake "
+                  "counter %.3f (solver's %.3f), %.2f m/s at the time",
+                  d.islandNodes, d.reason == 1 ? "an active kinematic touches it" : "bodies not ready to sleep",
+                  d.notReady, what, d.flags, d.wakeCounter, d.solverWakeCounter, d.speed);
+}
+
+// Once a second ([PhysX] DebugIslands): a big island the speculative island sim keeps awake. Its contact pairs keep
+// going (PhysX makes contacts for all of them every step) even while the accurate sim has the bodies asleep.
+void LogSpeculativeIsland() {
+    using namespace physx::IG;
+    static uint32_t last = 0;
+    static int logged = 0;
+    // (only while the accurate sim has the bodies asleep, at least most of them)
+    if (!gSleepDebugInfo[1].islandNodes || gSleepDebugInfo[0].islandNodes > gSleepDebugInfo[1].islandNodes / 2 ||
+        g_tick - last < 60 || logged >= 200)
+        return;
+    last = g_tick;
+    ++logged;
+    char spec[1024], acc[1024] = "none";
+    DescribeIsland(gSleepDebugInfo[1], 0, spec, sizeof(spec));
+    if (gSleepDebugInfo[0].islandNodes) DescribeIsland(gSleepDebugInfo[0], 0, acc, sizeof(acc));
+    LOG("offload island diag: tick %u: the speculative island sim (contact pairs) kept %s; the accurate one (bodies): %s",
+        g_tick, spec, acc);
+}
+
+// The step after a settle check (`verify`: that check's tick), before anything else looks at it: the island PhysX
+// kept awake, and the body that did it.
+void LogIslandDebug(uint32_t verify, uint32_t slept) {
+    using namespace physx::IG;
+    static int logged = 0;
+    if (logged >= 200) return;
+    ++logged;
+    if (!gSleepDebugInfo[0].islandNodes) {
+        LOG("offload settle diag: tick %u: no island of %u bodies or more stayed awake after %u pieces were put to sleep",
+            g_tick, gSleepDebugMinNodes, slept);
+        return;
+    }
+    char what[1024];
+    DescribeIsland(gSleepDebugInfo[0], verify, what, sizeof(what));
+    LOG("offload settle diag: tick %u: after %u pieces were put to sleep, PhysX kept %s", g_tick, slept, what);
 }
 void SettleClusters() {
     const uint64_t t0 = trace::Now();
@@ -3162,6 +3438,56 @@ void SettleClustersImpl() {
             g_largestLoudMoved = s.moved;
         }
     }
+    // Diagnostics ([PhysX] DebugSettle=N, every 5th check): the movers of the largest group that stays awake, by how
+    // far they got in the last second, how fast they got anywhere over ~5 s (shaking in place gets nowhere) and how
+    // fast they went; and the N that got furthest.
+    static uint32_t checks = 0;
+    static int logged = 0;
+    if (g_config.pxDebugSettle > 0 && g_largestLoudWin >= 500 && ++checks % 5 == 0 && logged < 150) {
+        ++logged;
+        uint32_t byMoved[4] = {}, byDrift[5] = {}, bySpeed[4] = {};
+        static std::vector<size_t> top;
+        top.clear();
+        for (size_t i = 0; i < n; ++i) {
+            const SettleItem& s = g_settleItems[i];
+            if (s.quiet || size[size_t(SettleRoot(parent, int(i)))] != g_largestLoudWin) continue;
+            ++byMoved[s.moved < 0.05f ? 0 : s.moved < 0.2f ? 1 : s.moved < 1.0f ? 2 : 3];
+            ++byDrift[s.drift < 0.0f ? 4 : s.drift < 0.01f ? 0 : s.drift < 0.05f ? 1 : s.drift < 0.2f ? 2 : 3];
+            ++bySpeed[s.speed < 1.0f ? 0 : s.speed < 3.0f ? 1 : s.speed < 10.0f ? 2 : 3];
+            top.push_back(i);
+        }
+        const size_t keep = std::min(top.size(), size_t(g_config.pxDebugSettle));
+        std::partial_sort(top.begin(), top.begin() + ptrdiff_t(keep), top.end(), [](size_t a, size_t b) {
+            return g_settleItems[a].drift > g_settleItems[b].drift;
+        });
+        char list[2048];
+        int len = 0;
+        list[0] = 0;
+        for (size_t k = 0; k < keep && len < int(sizeof(list)) - 200; ++k) {
+            const SettleItem& s = g_settleItems[top[k]];
+            const PxTransform pose = s.e->actor->getGlobalPose();
+            const PxVec3 c = pose.transform(s.e->actor->getCMassLocalPose().p);
+            len += std::snprintf(list + len, sizeof(list) - size_t(len),
+                                 "%s%u voxels, %.0f kg at (%.1f, %.1f, %.1f): %.2f m/s at most, %.0f cm in the last "
+                                 "second, %.1f cm/s over ~5 s",
+                                 k ? "; " : "", s.e->voxels, s.e->actor->getMass(), c.x, c.y, c.z, s.speed,
+                                 100.0f * s.moved, 100.0f * s.drift);
+            if (g_config.pxDiagOverlaps) {  // (expensive: see MeasureOverlaps)
+                const Overlaps ov = MeasureOverlaps(s.e->actor);
+                len += std::snprintf(list + len, sizeof(list) - size_t(len),
+                                     ", overlapping static %.0f mm (%d), debris %.0f mm (%d), proxies %.0f mm (%d)",
+                                     ov.statics * 1000.0f, ov.staticPairs, ov.debris * 1000.0f, ov.debrisPairs,
+                                     ov.proxies * 1000.0f, ov.proxyPairs);
+            }
+        }
+        LOG("offload settle groups diag: tick %u: the largest awake group, %u pieces, %u moving. In the last second "
+            "they got under 5 cm %u, 5-20 cm %u, 0.2-1 m %u, further %u; over ~5 s at under 1 cm/s %u, 1-5 cm/s %u, "
+            "5-20 cm/s %u, faster %u (%u not known yet); at most under 1 m/s %u, 1-3 m/s %u, 3-10 m/s %u, faster %u. "
+            "The furthest: %s",
+            g_tick, g_largestLoudWin, g_largestLoudMovers, byMoved[0], byMoved[1], byMoved[2], byMoved[3], byDrift[0],
+            byDrift[1], byDrift[2], byDrift[3], byDrift[4], bySpeed[0], bySpeed[1], bySpeed[2], bySpeed[3],
+            list[0] ? list : "none");
+    }
     g_settleItems.clear();
 }
 
@@ -3180,14 +3506,21 @@ uint32_t WriteBackAll(const std::vector<std::pair<uint8_t*, BodyEntry*>>* change
         // settle check (settleNow): how far its centre got since the last check, the fastest it went meanwhile;
         // the step after a check (verify): it was put to sleep there, and PhysX moved it again
         bool still, rewoke;
-        float moved, winSpeed;
+        float moved, winSpeed, drift;
     };
     static std::vector<Item> items;
     items.clear();
     for (Mover& m : g_movers) m = Mover{};
     const bool settleNow = g_offload && g_tick >= g_settleNext;
-    const uint32_t verify = g_sleptAt;
-    g_sleptAt = 0;
+    const uint32_t verify = g_sleptAt, sleptCount = g_sleptCount;
+    g_sleptAt = g_sleptCount = 0;
+    if (verify && g_config.pxDebugIslands > 0 && sleptCount >= uint32_t(g_config.pxDebugIslands))
+        LogIslandDebug(verify, sleptCount);
+    if (g_wakeArmed.load()) LogWakeDebug(verify);
+    if (g_config.pxDebugIslands > 0) {
+        LogIslandWakes();
+        LogSpeculativeIsland();
+    }
     for (PxU32 i = 0; i < n; ++i) {
         uint8_t* b = static_cast<uint8_t*>(act[i]->userData);
         if (!b) continue;
@@ -3246,6 +3579,20 @@ uint32_t WriteBackAll(const std::vector<std::pair<uint8_t*, BodyEntry*>>* change
             e.anchor = at;
             e.anchorTick = g_tick;
             e.maxSpeedWin = 0.0f;
+            // over 2-7 s (the newer of two anchors that is 2 s old): a piece that only shakes in place gets nowhere
+            const uint32_t span = g_tick - e.anchor5Tick;
+            if (e.anchor5Tick && span >= 120)
+                it.drift = (at - e.anchor5).magnitude() * 60.0f / float(span);
+            else if (e.anchorOldTick)
+                it.drift = (at - e.anchorOld).magnitude() * 60.0f / float(g_tick - e.anchorOldTick);
+            else
+                it.drift = -1.0f;
+            if (!e.anchor5Tick || span >= 300) {
+                e.anchorOld = e.anchor5;
+                e.anchorOldTick = e.anchor5Tick;
+                e.anchor5 = at;
+                e.anchor5Tick = g_tick;
+            }
         }
     });
     // A piece PhysX moved again in the step after it was put to sleep is put to sleep again at once, once.
@@ -3309,7 +3656,9 @@ uint32_t WriteBackAll(const std::vector<std::pair<uint8_t*, BodyEntry*>>* change
                 g_freezeQueue.push_back(it.b);
             }
             if (g_config.pxSettleClusters) {
-                g_settleItems.push_back({&e, e.bounds, it.winSpeed, it.moved, e.settled >= 2});
+                // quiet: still or slow at the last two checks, or it got nowhere over ~5 s however it shakes
+                const bool calm = it.drift >= 0.0f && it.drift < g_config.pxSettleDrift;
+                g_settleItems.push_back({&e, e.bounds, it.winSpeed, it.moved, e.settled >= 2 || calm, it.drift});
             } else if (!held && it.still && (it.speed < 2.0f || e.stuck >= 3)) {
                 SettleSleep(e);
                 e.retries = 0;
@@ -3411,6 +3760,8 @@ uint32_t WriteBackAll(const std::vector<std::pair<uint8_t*, BodyEntry*>>* change
         g_settleLast = g_sleptAt = g_tick;
         g_settleNext = g_tick + 60;
     }
+    if (g_config.pxDebugIslands > 0 && g_sleptAt == g_tick && g_sleptCount >= uint32_t(g_config.pxDebugIslands))
+        ArmWakeDebug();
     g_off.written += written;
     return written;
 }
@@ -3567,13 +3918,8 @@ void Compare() {
 
 // ---- reporting ---------------------------------------------------------------------------------------------
 
-// Diagnostics for pieces that never settle: how deep a body's colliders overlap the static blocks and the other
-// owned bodies around it (PxGeometryQuery, exact). A piece wedged in geometry vibrates in place for ever.
-struct Overlaps {
-    float statics = 0.0f, debris = 0.0f;  // deepest overlap, metres
-    int staticPairs = 0, debrisPairs = 0;  // pairs overlapping by more than 1 mm
-    int staleBlocks = 0;  // overlapped static blocks whose voxels changed since they were built
-};
+// Diagnostics for pieces that never settle: how deep a body's colliders overlap the static blocks, the other owned
+// bodies and the proxies around it (PxGeometryQuery, exact). A piece wedged in geometry vibrates in place for ever.
 Overlaps MeasureOverlaps(PxRigidDynamic* a) {
     Overlaps o;
     PxBounds3 wb = a->getWorldBounds();
@@ -3617,6 +3963,16 @@ Overlaps MeasureOverlaps(PxRigidDynamic* a) {
     for (auto& [b, e] : g_owned)
         if (e->actor && e->actor != a && e->actor->getWorldBounds().intersects(wb))
             test(e->actor, o.debris, o.debrisPairs);
+    for (uint8_t* pb : g_proxies) {  // the game's own bodies' stand-ins (their hulls may bulge past the voxels)
+        auto pit = g_bodies.find(pb);
+        if (pit == g_bodies.end()) continue;
+        BodyEntry& pe = pit->second;
+        if (pe.actor && pe.actor != a && pe.actor->getNbShapes() && pe.actor->getWorldBounds().intersects(wb))
+            test(pe.actor, o.proxies, o.proxyPairs);
+        for (BodyEntry::Part& p : pe.parts)
+            if (p.actor && p.actor->getNbShapes() && p.actor->getWorldBounds().intersects(wb))
+                test(p.actor, o.proxies, o.proxyPairs);
+    }
     return o;
 }
 
@@ -3708,12 +4064,12 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
             Overlaps ov = g_config.pxDiagOverlaps ? MeasureOverlaps(e.actor) : Overlaps{};
             len += std::snprintf(movers + len, sizeof(movers) - size_t(len),
                                  "%sbody %d %.2f m/s at (%.1f, %.1f, %.1f), %u voxels, %u colliders, owned %u ticks, "
-                                 "overlaps static %.0f mm (%d pairs, %d stale blocks) debris %.0f mm (%d pairs), nearest "
-                                 "moving proxy %s",
+                                 "overlaps static %.0f mm (%d pairs, %d stale blocks) debris %.0f mm (%d pairs) proxies "
+                                 "%.0f mm (%d pairs), nearest moving proxy %s",
                                  len ? "; " : "", Handle(m.b), m.speed, com.x, com.y, com.z, e.voxels, e.boxes,
                                  g_tick - e.ownedSince, ov.statics * 1000.0f, ov.staticPairs, ov.staleBlocks,
-                                 ov.debris * 1000.0f,
-                                 ov.debrisPairs, nearest < 1e8f ? "" : "none");
+                                 ov.debris * 1000.0f, ov.debrisPairs, ov.proxies * 1000.0f, ov.proxyPairs,
+                                 nearest < 1e8f ? "" : "none");
             clampLen();
             if (nearest < 1e8f) len += std::snprintf(movers + len, sizeof(movers) - size_t(len), "%.1f m", nearest);
             clampLen();
@@ -3731,7 +4087,7 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
             "%u put to sleep, %u not, the largest awake %u pieces, %u of them moving, %u held back, the fastest %.2f "
             "m/s and %.1f cm on; %llu large pieces joined by their bounds, %llu without bounds; %.1f ms, at most "
             "%.1f); %llu woke again in the step after a check (%llu put to sleep again at once), %llu held back, "
-            "%llu woken by the game's step; "
+            "%llu woken by the game's step; the player stood on owned debris %llu ticks (its weight on it %llu); "
             "%zu frozen (%llu froze, %llu thawed, %zu queued, %llu no longer settled at their turn, %llu failed; "
             "settle checks looked at %llu, %llu settled long enough; thaw boxes from %llu movers, %llu proxies, %llu "
             "player, %llu impulses); %llu builds deferred; %llu pieces launched (+25 m/s in a step) since start; fastest "
@@ -3742,7 +4098,7 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
             g_clustersLoudWin,
             g_largestLoudWin, g_largestLoudMovers, g_largestLoudHeld, g_largestLoudSpeed, 100.0f * g_largestLoudMoved,
             g_settleLargeWin, g_settleLoneWin, g_settleMsWin, g_settleMaxMsWin, g_settleRewokeWin, g_settleRetriedWin,
-            g_settleHeldWin, g_gameWokeWin, g_frozenCount, g_freezes,
+            g_settleHeldWin, g_gameWokeWin, g_playerGroundWin, g_playerWeightWin, g_frozenCount, g_freezes,
             g_thaws, g_freezeQueue.size(), g_freezeUnsettled, g_freezeFailed, g_settleLooked, g_settleLong,
             g_thawBoxesBy[kThawMover], g_thawBoxesBy[kThawProxy], g_thawBoxesBy[kThawPlayer],
             g_thawBoxesBy[kThawImpulse], g_buildsDeferred, g_launches, movers[0] ? movers : "none");
@@ -3827,7 +4183,7 @@ void ReportOffload(bool final, const Stats& s, uint32_t proxies, uint32_t waitin
         for (uint64_t& c : g_thawBoxesBy) c = 0;
         g_proxyMovesWin = g_proxyHeldWin = g_proxyJiggleWin = g_writeRestWin = g_quietWin = g_wedgedWin = 0;
         g_clusterSleptWin = g_settleStoppedWin = g_settleRewokeWin = g_settleRetriedWin = g_settleHeldWin = 0;
-        g_gameWokeWin = 0;
+        g_gameWokeWin = g_playerGroundWin = g_playerWeightWin = 0;
         g_settleLargeWin = g_settleLoneWin = 0;
         g_clustersQuietWin = g_clustersLoudWin = g_largestLoudWin = g_largestLoudMovers = g_largestLoudHeld = 0;
         g_largestLoudSpeed = g_largestLoudMoved = 0.0f;
@@ -4016,6 +4372,8 @@ bool Start() {
     p.events = g_config.pxShadow == 3 ? &g_collector : nullptr;  // sleep/wake events keep physxAwake exact
     p.reportContacts = g_config.pxImpacts || g_config.pxDamage;
     p.noKinematicContacts = g_config.pxDebugNoKinematicContacts;
+    physx::IG::gSleepDebugMinNodes = PxU32(std::max(0, g_config.pxDebugIslands));
+    physx::IG::gActivateDebugHook = g_config.pxDebugIslands > 0 ? WakeHook : nullptr;
     p.gpu = g_config.pxGpu;
     p.gpuBroadphase = g_config.pxGpuBroadphase;
     p.gpuContacts = unsigned(std::max(1024, g_config.pxGpuContacts));
@@ -4128,8 +4486,10 @@ void Stop() {
     g_carveDead.clear();
     g_pendBodies.clear();
     g_pendKinematic.clear();
-    g_sleptAt = 0;
+    g_sleptAt = g_sleptCount = 0;
     g_holdForPlayer = false;
+    g_wakeArmed = false;
+    physx::IG::gActivateDebugHook = nullptr;
     g_skipTick = false;
     g_pendingTicks = 0;
     px::DestroyWorld();
@@ -4252,6 +4612,11 @@ void* __fastcall HkShapeDtor(uint8_t* self, uint32_t flags) {
 // loops in 0x1400b4850 / 0x1400b59a8. The other callers (vehicles, joints, wheels, script constraints) want to
 // constrain the body.
 constexpr uint32_t kContactWakeReturns[] = {0xacbae, 0xacbc5, 0xb49e3, 0xb4a0e, 0xb5a13, 0xb5a3d};
+// The player's constraints (0x1400bcd50) call it for the body the player stands on (player+0x8d8, from up to 16
+// queries under the feet: static ground first, else the heaviest), then wake that body themselves (0x140031330) and
+// add one constraint between the player and it. Their other NarrowWake call (return 0xbf385) is left to take
+// the body: there the player pushes it.
+constexpr uint32_t kPlayerGroundWakeReturn = 0xbdf34;
 
 // A contact with an owned body needs a solver slot (the solver maps every contact's body index through a table;
 // -1 reads outside it). Give the body a static one, as Physics::update does for static bodies each step: zero
@@ -4276,11 +4641,16 @@ void __fastcall HkNarrowWake(uint8_t* physics, uint8_t* body) {
         uint32_t ra = uint32_t(reinterpret_cast<uintptr_t>(_ReturnAddress()) - td::Base());
         bool contact = false;
         for (uint32_t r : kContactWakeReturns) contact |= r == ra;
+        const bool ground = ra == kPlayerGroundWakeReturn && g_config.pxPlayerGround;
         auto it = g_owned.find(body);
         if (it != g_owned.end()) {
-            if (contact) {  // owned debris is a static obstacle for the native body touching it
+            // owned debris is a static obstacle for the native body touching it, and for the player standing on it
+            if (contact || ground) {
                 StaticSlot(physics, body);
-                g_contactSkips.fetch_add(1, std::memory_order_relaxed);
+                if (ground)
+                    g_playerGround.store(body, std::memory_order_relaxed);
+                else
+                    g_contactSkips.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             // a native constraint takes it: back with PhysX's velocity (the per-body pass zeroed it), then wake
@@ -4442,6 +4812,18 @@ bool Install() {
                       Hook(Addr::SolverIslands, reinterpret_cast<void*>(&HkSolverIslands),
                            reinterpret_cast<void**>(&oSolverIslands));
         LOG("offload: held-body wake and solver constraint guard %s", guards ? "installed" : "MISSING");
+        // PlayerGround needs the player's ground-body wake where this build has it: a call to NarrowWake
+        if (g_config.pxPlayerGround) {
+            const uint8_t* call = reinterpret_cast<const uint8_t*>(td::Base() + kPlayerGroundWakeReturn - 5);
+            int32_t rel = 0;
+            std::memcpy(&rel, call + 1, sizeof(rel));
+            g_config.pxPlayerGround = off && call[0] == 0xe8 &&
+                                      reinterpret_cast<uintptr_t>(call) + 5 + intptr_t(rel) ==
+                                          reinterpret_cast<uintptr_t>(td::Fn<NarrowWakeFn>(Addr::NarrowWake));
+            LOG("offload: the piece the player stands on %s", g_config.pxPlayerGround
+                                                                 ? "stays PhysX's (PlayerGround)"
+                                                                 : "goes to the game (PlayerGround off: call not found)");
+        }
         bool lua = off && td::CodeMatches(Addr::LuaArgInt) && td::CodeMatches(Addr::LuaPushBool) &&
                    Hook(Addr::LuaIsBodyActive, reinterpret_cast<void*>(&HkIsBodyActive),
                         reinterpret_cast<void**>(&oIsBodyActive));

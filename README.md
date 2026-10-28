@@ -12,7 +12,7 @@ runs are kept out of the repository for now.
 - `src/`: the plugin (`px/` PhysX offload, `fix/` engine fixes, `hooks/`, `td/` game structures, `trace/` tracing).
   Settings and their defaults: `src/core/config.h` (read from `TeardownPhysX.ini`).
 - `tools/`: build, install, benchmark and recording scripts.
-- `third_party/`: MinHook and the PhysX SDK as git submodules; `patches/` holds the local change to the SDK.
+- `third_party/`: MinHook and the PhysX SDK as git submodules; `patches/` holds the local changes to the SDK.
 
 ## Building
 
@@ -20,8 +20,9 @@ Needs Visual Studio with the v143 (14.44) toolset, CMake and Ninja (both ship wi
 12.8 toolkit for the GPU build.
 
 1. `git submodule update --init`
-2. `git -C third_party/physx-sdk apply ../patches/physx-sdk-gpu-archs.patch` (lets `build_physx_gpu.cmd` pick the
-   GPU architectures to compile)
+2. `git -C third_party/physx-sdk apply ../patches/physx-sdk-gpu-archs.patch ../patches/physx-sdk-sleep.patch`
+   (the first lets `build_physx_gpu.cmd` pick the GPU architectures to compile; the second keeps bodies the plugin
+   puts to sleep asleep, and adds the island diagnostics behind `[PhysX] DebugIslands`)
 3. `tools\build_physx_gpu.cmd` (PhysX with GPU support; the first build takes hours) or `tools\build_physx.cmd`
    (CPU only)
 4. `tools\build.cmd`: `build\TeardownPhysX.asi`

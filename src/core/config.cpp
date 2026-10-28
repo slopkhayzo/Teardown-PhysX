@@ -138,6 +138,8 @@ void Config::Load(const std::string& path) {
     pxPlayer = ReadBool(path, "PhysX", "Player", pxPlayer);
     pxPlayerRadius = float(ReadNum(path, "PhysX", "PlayerRadius", pxPlayerRadius));
     pxPlayerHeight = float(ReadNum(path, "PhysX", "PlayerHeight", pxPlayerHeight));
+    pxPlayerGround = ReadBool(path, "PhysX", "PlayerGround", pxPlayerGround);
+    pxPlayerWeight = float(ReadNum(path, "PhysX", "PlayerWeight", pxPlayerWeight));
     pxRegainTicks = int(ReadNum(path, "PhysX", "RegainTicks", pxRegainTicks));
     pxCcd = ReadBool(path, "PhysX", "CCD", pxCcd);
     pxMaxSpeed = float(ReadNum(path, "PhysX", "MaxSpeed", pxMaxSpeed));
@@ -150,6 +152,7 @@ void Config::Load(const std::string& path) {
     pxPositionIters = int(ReadNum(path, "PhysX", "PositionIters", pxPositionIters));
     pxVelocityIters = int(ReadNum(path, "PhysX", "VelocityIters", pxVelocityIters));
     pxSleepThreshold = float(ReadNum(path, "PhysX", "SleepThreshold", pxSleepThreshold));
+    pxSettleDrift = float(ReadNum(path, "PhysX", "SettleDrift", pxSettleDrift));
     pxFreezeAfter = int(ReadNum(path, "PhysX", "FreezeAfter", pxFreezeAfter));
     pxFreezeSpeed = float(ReadNum(path, "PhysX", "FreezeSpeed", pxFreezeSpeed));
     pxSettleClusters = ReadBool(path, "PhysX", "SettleClusters", pxSettleClusters);
@@ -163,6 +166,8 @@ void Config::Load(const std::string& path) {
     pxLinearDamping = float(ReadNum(path, "PhysX", "LinearDamping", pxLinearDamping));
     pxDiagOverlaps = ReadBool(path, "PhysX", "DiagOverlaps", pxDiagOverlaps);
     pxDebugNoKinematicContacts = ReadBool(path, "PhysX", "DebugNoKinematicContacts", pxDebugNoKinematicContacts);
+    pxDebugIslands = int(ReadNum(path, "PhysX", "DebugIslands", pxDebugIslands));
+    pxDebugSettle = int(ReadNum(path, "PhysX", "DebugSettle", pxDebugSettle));
     pxAngularDamping = float(ReadNum(path, "PhysX", "AngularDamping", pxAngularDamping));
     pxProxyDeadband = float(ReadNum(path, "PhysX", "ProxyDeadband", pxProxyDeadband));
     pxWriteDeadband = float(ReadNum(path, "PhysX", "WriteDeadband", pxWriteDeadband));

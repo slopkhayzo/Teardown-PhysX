@@ -143,6 +143,11 @@ struct Config {
     // offload (Shadow=3)
     bool pxPlayer = true;              // a kinematic capsule follows the player and pushes debris
     float pxPlayerRadius = 0.35f, pxPlayerHeight = 1.8f;
+    // The piece of debris the player stands on stays PhysX's (the game sees a static obstacle, as for other bodies
+    // touching debris) and gets the player's weight there while it moves; 0: the game takes it while stood on (its
+    // stand-in in PhysX then shoves the debris under it aside: the player sinks into a pile).
+    bool pxPlayerGround = true;
+    float pxPlayerWeight = 80.0f;      // kg pressing on that piece (0: none)
     int pxRegainTicks = 30;            // a body handed back to the game stays native at least this long
     bool pxCcd = false;                // speculative CCD on owned debris (made piles of fresh debris explode)
     float pxMaxSpeed = 150.0f;         // watchdog: owned debris faster than this (m/s) goes back to the game
@@ -161,6 +166,10 @@ struct Config {
     // mass-normalised kinetic energy below which debris may sleep (0: PhysX's, ~0.005). With PhysX's, a resting pile
     // of ~4,000 pieces never sleeps (a few slow sliders keep its island awake); with 0.05 (~0.3 m/s) it all sleeps.
     float pxSleepThreshold = 0.05f;
+    // m/s: a piece whose centre got no further than this over the last ~5 s counts as quiet for the settle check,
+    // however fast it shakes: a big pile presses its pieces centimetres into each other, and PhysX pushing them apart
+    // keeps hundreds creeping at 1-5 cm/s for ever (Volkograd). 0: only the one-second rules.
+    float pxSettleDrift = 0.05f;
     // Settled debris is frozen (kinematic in PhysX: in no island, no step cost) after this many settle checks (one
     // a second) in a row in which it got nowhere or never went faster than FreezeSpeed (m/s: a big pile creeps at
     // 5-20 cm/s for ever); one more check for each time in a row it thawed within a minute of freezing. It thaws
@@ -194,6 +203,10 @@ struct Config {
     float pxWriteDeadband = 0.001f;    // a PhysX body's move smaller than this isn't written to the game (it rests)
     bool pxDiagOverlaps = false;       // the creep line measures the fastest pieces' overlaps (slow: diagnostics)
     bool pxDebugNoKinematicContacts = false;  // diagnostics: proxies and the player's capsule touch no debris
+    // diagnostics: after a settle check, PhysX's reason for keeping an island of at least this many bodies awake
+    // (our PhysX build records it in its island sim; 0: off)
+    int pxDebugIslands = 0;
+    int pxDebugSettle = 0;  // N > 0: every 5 s, how the largest awake group's movers move, and the N that get furthest
     float pxLinearDamping = 0.0f;      // per owned debris actor (0: free flight like the game's)
     float pxAngularDamping = 0.0f;     // (PhysX's own default is 0.05)
     bool pxImpacts = true;             // offload: PhysX impacts become the game's impact sounds

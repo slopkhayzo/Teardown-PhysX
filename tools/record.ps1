@@ -4,6 +4,9 @@
 #   record.ps1 -Name vertigo1 -Mod steam-2658944037 -Level vertigo.xml -Layers 'sunny sandbox tspawn' -Mission de_vertigo -Queue
 #   record.ps1 -Name lee1 -Queue                (Lee Chemicals sandbox)
 #   record.ps1 -Name vertigo_px -Mod ... -Set 'PhysX.Shadow=3' -Queue   (play with PhysX simulating the debris)
+# Without -Name the recording is named <preset or "rec">-<date>-<time>.
+# The user starts these from the queue app instead (profiles\teardown-physx in the queue folder), which runs them as
+# queue jobs with -InQueue.
 #
 # -Set: plugin settings for the session ('Section.Key=value;...', as in run_bench.ps1). They are stored in
 #       session.json; replays use the plugin's defaults unless run_bench.ps1 gets the same -Set.
@@ -24,7 +27,7 @@
 #   record.ps1 -Name russian1 -Preset russian -Queue   (Russian Town 3)
 #   record.ps1 -Name volkograd1 -Preset volkograd -Queue   (Volkograd town winter: the biggest piles so far)
 param(
-    [Parameter(Mandatory)][string]$Name,
+    [string]$Name = '',          # default: <preset or "rec">-<date>-<time>
     [string]$Preset = '',
     [string]$Mod = '',
     [string]$Level = 'lee.xml',
@@ -36,9 +39,11 @@ param(
     [switch]$InQueue,
     [int]$StopAfterFrames = 0,   # tests: the recording ends by itself after this many frames
     [string]$Set = '',
+    [string]$Asi = '',           # the plugin build to play (default: build\TeardownPhysX.asi; profiles pin one)
     [string]$GameDir = 'D:\Program Files\Games\Steam\steamapps\common\Teardown'
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Name) { $Name = "$(if ($Preset) { $Preset } else { 'rec' })-$(Get-Date -Format 'yyyyMMdd-HHmm')" }
 if ($Preset) {
     $stress = 'PhysX.Shadow=3;PhysX.Gpu=1;Fix.KeepDebris=1;Tool.Enabled=1;Trace.Sampler=1;Trace.Threads=1;Session.HangKillSeconds=0'
     $presets = @{
@@ -69,7 +74,7 @@ if ($Queue) {
     $q = { param($s) "'" + ($s -replace "'", "''") + "'" }
     $cmd = "& $(& $q (Join-Path $PSScriptRoot 'record.ps1')) -Name $(& $q $Name) -Mod $(& $q $Mod) " +
            "-Level $(& $q $Level) -Layers $(& $q $Layers) -Mission $(& $q $Mission) -Seed $Seed " +
-           "-StopAfterFrames $StopAfterFrames -Set $(& $q $Set) -InQueue -Force; " + 'exit $LASTEXITCODE'
+           "-StopAfterFrames $StopAfterFrames -Set $(& $q $Set) -Asi $(& $q $Asi) -InQueue -Force; " + 'exit $LASTEXITCODE'
     $job = [ordered]@{
         name = "Teardown play session (user at the keyboard): record $Name"
         owner = 'Teardown-PhysX'
@@ -129,7 +134,8 @@ foreach ($kv in ($Set -split ';' | Where-Object { $_ -match '=' })) {
 }
 $(foreach ($sec in $sections.Keys) { "[$sec]"; foreach ($key in $sections[$sec].Keys) { "$key=$($sections[$sec][$key])" } }) |
     Set-Content -Encoding ASCII $ini
-Copy-Item (Join-Path $repo 'build\TeardownPhysX.asi') $rec -Force
+if (-not $Asi) { $Asi = Join-Path $repo 'build\TeardownPhysX.asi' }
+Copy-Item $Asi $rec -Force
 & (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $rec 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir
 try {
     $env:TDPX_INI = $ini

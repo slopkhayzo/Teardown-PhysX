@@ -1,0 +1,279 @@
+diff --git a/physx/source/lowlevel/software/src/PxsIslandSim.cpp b/physx/source/lowlevel/software/src/PxsIslandSim.cpp
+index efe03bf..6d09a2e 100644
+--- a/physx/source/lowlevel/software/src/PxsIslandSim.cpp
++++ b/physx/source/lowlevel/software/src/PxsIslandSim.cpp
+@@ -7,8 +7,54 @@
+ #include "foundation/PxSort.h"
+ #include "foundation/PxUtilities.h"
+ #include "common/PxProfileZone.h"
++#include "PxsRigidBody.h"
++
++namespace physx
++{
++namespace IG
++{
++// TeardownPhysX diagnostics, off while gSleepDebugMinNodes is 0: the biggest island of at least that many bodies that
++// the last deactivation pass of each island sim kept awake, and why ([0] the accurate island sim, which puts bodies to
++// sleep; [1] the speculative one, which keeps their contact pairs going). Plain globals: the island classes' layout is
++// compiled into PhysXGpu_64.dll and must not change.
++struct SleepDebugInfo
++{
++	PxU32 islandNodes;		// that island's bodies (0: none this step)
++	PxU32 reason;			// 1: an active kinematic not ready to sleep touches it, 2: bodies not ready
++	PxU32 notReady;			// its bodies not ready to sleep
++	const void* object;		// the kinematic, or the first body not ready (a PxsRigidBody)
++	PxU32 flags;			// that node's flags
++	PxReal wakeCounter, solverWakeCounter, speed;
++};
++PxU32 gSleepDebugMinNodes = 0;
++const void* gSleepDebugSim = NULL;		// the accurate island sim (SimpleIslandManager::thirdPassIslandGen)
++const void* gSleepDebugSpecSim = NULL;	// the speculative one
++SleepDebugInfo gSleepDebugInfo[2] = {};
++// Called (when set) whenever the accurate island sim is told that a dynamic body that was ready to sleep no longer is:
++// the low-level body (a PxsRigidBody) and its wake counter at that moment.
++void (*gActivateDebugHook)(const void* rigid, PxReal wakeCounter) = NULL;
++// Sleeping islands of at least gSleepDebugMinNodes bodies the accurate island sim woke (the plugin reads and clears
++// these), by cause: 0 a body of the island woke, 1 a kinematic touching one of its bodies woke, 2 a new contact with an
++// active kinematic, 3 a new contact with an awake body or island; and the node that did it the last time (its mObject:
++// a PxsRigidBody).
++PxU32 gWakeDebugCount[4] = {0, 0, 0, 0};
++const void* gWakeDebugObject[4] = {NULL, NULL, NULL, NULL};
++}
++}
+ 
+ using namespace physx;
++
++namespace
++{
++PX_FORCE_INLINE void noteIslandWake(bool accurate, PxU32 islandBodies, PxU32 cause, const void* object)
++{
++	if(accurate && IG::gSleepDebugMinNodes && islandBodies >= IG::gSleepDebugMinNodes)
++	{
++		IG::gWakeDebugCount[cause]++;
++		IG::gWakeDebugObject[cause] = object;
++	}
++}
++}
+ using namespace IG;
+ 
+ #if IG_CACHE_CONTACT_MANAGER_DATA
+@@ -642,6 +688,11 @@ void IslandSim::activateNode(PxNodeIndex nodeIndex)
+ 	{
+ 		Node& node = mNodes[index];
+ 
++		// TeardownPhysX diagnostics (gActivateDebugHook)
++		if(gActivateDebugHook && this == gSleepDebugSim && node.isReadyForSleeping() && !node.isKinematic() &&
++			node.mObject && node.getNodeType() == Node::eRIGID_BODY_TYPE)
++			gActivateDebugHook(node.mObject, static_cast<const PxsRigidBody*>(node.mObject)->getCore().wakeCounter);
++
+ 		if(!node.isActiveOrActivating())
+ 		{
+ 			//If the node is kinematic and already in the active node list, then we need to remove it
+@@ -956,7 +1007,10 @@ void IslandSim::wakeIslandsInternal(bool flag)
+ 		if(islandId != IG_INVALID_ISLAND)
+ 		{
+ 			if(!mIslandAwake.test(islandId))
+-				markIslandActive(islandId);						
++			{
++				noteIslandWake(this == gSleepDebugSim, mIslands[islandId].mNodeCount[Node::eRIGID_BODY_TYPE], 0, node.mObject);
++				markIslandActive(islandId);
++			}
+ 
+ 			mActiveNodeIndex[wakeNode.index()] = PX_INVALID_NODE; //Mark active node as invalid.
+ 			activateNodeInternal(wakeNode);
+@@ -990,6 +1044,7 @@ void IslandSim::wakeIslandsInternal(bool flag)
+ 					const IslandId connectedIslandId = mIslandIds[nodeIndex.index()];
+ 					if(!mIslandAwake.test(connectedIslandId))
+ 					{
++						noteIslandWake(this == gSleepDebugSim, mIslands[connectedIslandId].mNodeCount[Node::eRIGID_BODY_TYPE], 1, node.mObject);
+ 						//Wake up that island
+ 						markIslandActive(connectedIslandId);
+ 					}
+@@ -1100,6 +1155,7 @@ IslandId IslandSim::addNodeToIsland(PxNodeIndex nodeIndex1, PxNodeIndex nodeInde
+ 			{
+ 				if(!mIslandAwake.test(islandId2))
+ 				{
++					noteIslandWake(this == gSleepDebugSim, mIslands[islandId2].mNodeCount[Node::eRIGID_BODY_TYPE], 3, node.mObject);
+ 					//This island wasn't already awake, so need to wake the whole island up
+ 					activateIsland(islandId2);
+ 				}
+@@ -1112,6 +1168,7 @@ IslandId IslandSim::addNodeToIsland(PxNodeIndex nodeIndex1, PxNodeIndex nodeInde
+ 		}
+ 		else if(active1 && !active2)
+ 		{
++			noteIslandWake(this == gSleepDebugSim, mIslands[islandId2].mNodeCount[Node::eRIGID_BODY_TYPE], 2, mNodes[index1].mObject);
+ 			//Active kinematic object -> wake island!
+ 			activateIsland(islandId2);
+ 		}
+@@ -1262,11 +1319,13 @@ void IslandSim::processNewEdges()
+ 						//the bodies are activated
+ 						if(!mIslandAwake.test(islandId1))
+ 						{
++							noteIslandWake(this == gSleepDebugSim, mIslands[islandId1].mNodeCount[Node::eRIGID_BODY_TYPE], 3, mNodes[index2].mObject);
+ 							//This island wasn't already awake, so need to wake the whole island up
+ 							activateIsland(islandId1);
+ 						}
+ 						if(!mIslandAwake.test(islandId2))
+ 						{
++							noteIslandWake(this == gSleepDebugSim, mIslands[islandId2].mNodeCount[Node::eRIGID_BODY_TYPE], 3, mNodes[index1].mObject);
+ 							//This island wasn't already awake, so need to wake the whole island up
+ 							activateIsland(islandId2);
+ 						}
+@@ -1907,6 +1966,16 @@ void IslandSim::processLostEdges(const PxArray<PxNodeIndex>& destroyedNodes, boo
+ 			mIslandAwake.reset(islandId);
+ 		}
+ 
++		// TeardownPhysX diagnostics (gSleepDebugMinNodes): which kinematic kept a big island awake
++		SleepDebugInfo* const dbg = !gSleepDebugMinNodes ? NULL : this == gSleepDebugSim ? &gSleepDebugInfo[0]
++			: this == gSleepDebugSpecSim ? &gSleepDebugInfo[1] : NULL;
++		const bool sleepDebug = dbg != NULL;
++		const void* taggedBy[16];
++		IslandId taggedIsland[16];
++		PxU32 nbTagged = 0;
++		if (sleepDebug)
++			*dbg = SleepDebugInfo();
++
+ 		//Loop over the active kinematic nodes and tag all islands touched by active kinematics as awake
+ 		for (PxU32 a = mActiveKinematicNodes.size(); a > 0; --a)
+ 		{
+@@ -1939,6 +2008,12 @@ void IslandSim::processLostEdges(const PxArray<PxNodeIndex>& destroyedNodes, boo
+ 							IslandId islandId = mIslandIds[outNode.index()];
+ 							if (islandId != IG_INVALID_ISLAND)
+ 							{
++								if (sleepDebug && nbTagged < 16 && !mIslandAwake.test(islandId) &&
++									mIslands[islandId].mNodeCount[Node::eRIGID_BODY_TYPE] >= gSleepDebugMinNodes)
++								{
++									taggedBy[nbTagged] = kinematicNode.mObject;
++									taggedIsland[nbTagged++] = islandId;
++								}
+ 								mIslandAwake.set(islandId);
+ 								PX_ASSERT(mIslands[islandId].mActiveIndex != IG_INVALID_ISLAND);
+ 							}
+@@ -1956,6 +2031,7 @@ void IslandSim::processLostEdges(const PxArray<PxNodeIndex>& destroyedNodes, boo
+ 			const Island& island = mIslands[islandId];
+ 
+ 			bool canDeactivate = !mIslandAwake.test(islandId);
++			const bool tagged = !canDeactivate;
+ 			mIslandAwake.set(islandId);
+ 
+ 			//If it was touched by an active kinematic in the above loop, we can't deactivate it.
+@@ -1975,11 +2051,57 @@ void IslandSim::processLostEdges(const PxArray<PxNodeIndex>& destroyedNodes, boo
+ 				}
+ 				if (canDeactivate)
+ 				{
+-					//If all nodes in this island are ready for sleeping and there were no active 
++					//If all nodes in this island are ready for sleeping and there were no active
+ 					//kinematics interacting with the any bodies in the island, we can deactivate the island.
+ 					deactivateIsland(islandId);
+ 				}
+ 			}
++
++			// TeardownPhysX diagnostics (gSleepDebugMinNodes): the biggest island kept awake, and why
++			const PxU32 islandNodes = island.mNodeCount[Node::eRIGID_BODY_TYPE];
++			if (sleepDebug && !canDeactivate && islandNodes >= gSleepDebugMinNodes && islandNodes > dbg->islandNodes)
++			{
++				dbg->islandNodes = islandNodes;
++				dbg->notReady = 0;
++				dbg->object = NULL;
++				dbg->flags = 0;
++				dbg->wakeCounter = dbg->solverWakeCounter = dbg->speed = 0.0f;
++				if (tagged)
++				{
++					dbg->reason = 1;
++					for (PxU32 t = 0; t < nbTagged; ++t)
++						if (taggedIsland[t] == islandId)
++						{
++							dbg->object = taggedBy[t];
++							break;
++						}
++				}
++				else
++				{
++					dbg->reason = 2;
++				}
++				PxNodeIndex nodeId = island.mRootNode;
++				while (nodeId.index() != PX_INVALID_NODE)
++				{
++					const Node& node = mNodes[nodeId.index()];
++					if (!node.isReadyForSleeping())
++					{
++						if (!dbg->notReady++ && !tagged)
++						{
++							dbg->object = node.mObject;
++							dbg->flags = node.mFlags;
++							if (node.mObject && node.getNodeType() == Node::eRIGID_BODY_TYPE)
++							{
++								const PxsBodyCore& core = static_cast<const PxsRigidBody*>(node.mObject)->getCore();
++								dbg->wakeCounter = core.wakeCounter;
++								dbg->solverWakeCounter = core.solverWakeCounter;
++								dbg->speed = core.linearVelocity.magnitude();
++							}
++						}
++					}
++					nodeId = node.mNextNode;
++				}
++			}
+ 		}
+ 	}
+ 
+diff --git a/physx/source/lowlevel/software/src/PxsSimpleIslandManager.cpp b/physx/source/lowlevel/software/src/PxsSimpleIslandManager.cpp
+index c1aa211..df5292a 100644
+--- a/physx/source/lowlevel/software/src/PxsSimpleIslandManager.cpp
++++ b/physx/source/lowlevel/software/src/PxsSimpleIslandManager.cpp
+@@ -307,8 +307,19 @@ void SimpleIslandManager::secondPassIslandGenPart2()
+ 	//mDestroyedEdges.clear();
+ }
+ 
++namespace physx
++{
++namespace IG
++{
++extern const void* gSleepDebugSim;  // TeardownPhysX diagnostics (PxsIslandSim.cpp)
++extern const void* gSleepDebugSpecSim;
++}
++}
++
+ void SimpleIslandManager::thirdPassIslandGen(PxBaseTask* continuation)
+ {
++	gSleepDebugSim = &mAccurateIslandManager;
++	gSleepDebugSpecSim = &mSpeculativeIslandManager;
+ 	mAccurateIslandManager.clearDeactivations();
+ 
+ 	mPostThirdPassTask.setContinuation(continuation);
+diff --git a/physx/source/simulationcontroller/src/ScScene.cpp b/physx/source/simulationcontroller/src/ScScene.cpp
+index 25d1614..fc3bb07 100644
+--- a/physx/source/simulationcontroller/src/ScScene.cpp
++++ b/physx/source/simulationcontroller/src/ScScene.cpp
+@@ -3875,3 +3875,15 @@ void Sc::Scene::setActiveDeformableVolumeActors(PxActor** actors, PxU32 nbActors
+ 
+ #endif //PX_SUPPORT_GPU_PHYSX
+ 
++
++// TeardownPhysX diagnostics: the actor of a low-level rigid body (an island node's object, see gSleepDebugObject)
++namespace physx
++{
++PxActor* PxDebugActorOfRigid(const void* rigid)
++{
++	if(!rigid)
++		return NULL;
++	Sc::BodySim* sim = reinterpret_cast<Sc::BodySim*>(const_cast<PxU8*>(reinterpret_cast<const PxU8*>(rigid)) - Sc::BodySim::getRigidBodyOffset());
++	return sim->getBodyCore().getPxActor();
++}
++}
+diff --git a/physx/source/simulationcontroller/src/ScShapeInteraction.cpp b/physx/source/simulationcontroller/src/ScShapeInteraction.cpp
+index 5db7404..4cebc9f 100644
+--- a/physx/source/simulationcontroller/src/ScShapeInteraction.cpp
++++ b/physx/source/simulationcontroller/src/ScShapeInteraction.cpp
+@@ -715,7 +715,11 @@ bool Sc::ShapeInteraction::managerLostTouch(PxU32 ccdPass, PxsContactManagerOutp
+ 
+ 	if(getActor1().isStaticRigid())
+ 	{
+-		getActor0().internalWakeUp();
++		// TeardownPhysX: not a body the application has put to sleep (as Scene::processLostTouchPairs leaves two
++		// sleeping bodies asleep). Its pairs keep running until the island sim deactivates its island, so a touch lost
++		// to where the step before left it would wake it, and through it its whole island.
++		if(getActor0().isActive())
++			getActor0().internalWakeUp();
+ 		return false;
+ 	}
+ 	return true;
