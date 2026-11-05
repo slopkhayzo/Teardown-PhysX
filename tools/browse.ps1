@@ -3,7 +3,8 @@
 # loose pieces). Start any levels from the menu, as many as you like; quit the game (Quit in the main or pause menu)
 # to end the session. Nothing is recorded.
 # The plugin logs each level you start (mission, path, layers, mod, size in voxels), where you cut from, and the
-# frame rate every 10 s of play, so a level you liked can become a benchmark.
+# frame rate every 10 s of play, so a level you liked can become a benchmark. The game's RAM and VRAM are read from
+# outside it every 10 s too (memory.csv), and shown beside the frame rates at the end.
 #
 #   browse.ps1 -Queue                          (through the shared queue: the game opens when the job's turn comes)
 #   browse.ps1 -Queue -Set 'PhysX.Gpu=0'       (other plugin settings, 'Section.Key=value;...' as in run_bench.ps1)
@@ -12,7 +13,8 @@
 #       tool unless -Set 'Tool.Enabled=1', no mod overrides); its log goes to <game>\TeardownPhysX_logs, as for a
 #       player, and is moved into the session folder afterwards. -Asi: the plugin build to play (profiles pin one).
 #
-# Output: research\browse\<date-time>\  plugin.log (the lines above are printed at the end), TeardownPhysX.ini, ...
+# Output: research\browse\<date-time>\  plugin.log (the lines above are printed at the end), memory.csv,
+#   TeardownPhysX.ini, ...
 param(
     [switch]$Queue,
     [switch]$Force,
@@ -112,16 +114,59 @@ Copy-Item $Asi $Out -Force
 $beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
 $gpuDll = if (Test-Path $beside) { $beside } else { '' }
 & (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $Out 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
+
+# RAM and VRAM every 10 s while the game runs, from Windows' own counters (Task Manager's), into memory.csv:
+#   game_ram_mb    the game's private memory (committed: Task Manager's commit size)
+#   game_inram_mb  its working set, the part of it in RAM at that moment
+#   free_ram_mb    the PC's available RAM
+#   game_vram_mb   the game's dedicated GPU memory (Direct3D and PhysX's CUDA)
+#   card_vram_mb   the card's memory in use by every program (as nvidia-smi gives it)
+# The first row, 'before', is the PC before the game starts. The per-program GPU counter is wrong for some programs
+# (one read 34 GB on a 24 GB card while the card's whole use was 2 GB), hence the card's too.
+$memCsv = Join-Path $Out 'memory.csv'
+function Get-CardVramMb {
+    try {
+        $a = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction Stop
+        [math]::Round(($a | Measure-Object DedicatedUsage -Maximum).Maximum / 1MB)
+    } catch { '' }
+}
+function Get-FreeRamMb {
+    try { (Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop).AvailableMBytes } catch { '' }
+}
+function Write-MemorySample($game, [datetime]$start) {
+    $now = Get-Date
+    $ram = $inRam = $vram = ''
+    try {
+        $game.Refresh()
+        $ram = [math]::Round($game.PrivateMemorySize64 / 1MB)
+        $inRam = [math]::Round($game.WorkingSet64 / 1MB)
+    } catch { }
+    try {
+        $g = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction Stop |
+            Where-Object { $_.Name -like "pid_$($game.Id)_*" }
+        $vram = [math]::Round(($g | Measure-Object DedicatedUsage -Sum).Sum / 1MB)
+    } catch { }
+    Add-Content -Encoding ASCII $memCsv ('{0},{1:F0},{2},{3},{4},{5},{6}' -f $now.ToString('HH:mm:ss'),
+        ($now - $start).TotalSeconds, $ram, $inRam, (Get-FreeRamMb), $vram, (Get-CardVramMb))
+}
+
 try {
     $env:TDPX_INI = $ini
     $env:SteamAppId = '1167630'
     $env:SteamGameId = '1167630'
     $toolOn = $sections.Contains('Tool') -and "$($sections['Tool']['Enabled'])" -eq '1'
     $tool = if ($toolOn) { ' Middle mouse: cut what you aim at.' } else { '' }
+    # (the first counter query also starts Windows' counter provider, a few seconds, before the game rather than in it)
+    Set-Content -Encoding ASCII $memCsv 'time,t_s,game_ram_mb,game_inram_mb,free_ram_mb,game_vram_mb,card_vram_mb'
+    Add-Content -Encoding ASCII $memCsv ('before,,,,{0},,{1}' -f (Get-FreeRamMb), (Get-CardVramMb))
     Write-Output "Starting Teardown at its main menu.$tool Quit the game to end the session."
     $p = Start-Process -FilePath (Join-Path $GameDir 'teardown.exe') -WorkingDirectory $GameDir -PassThru
-    $p.WaitForExit()
-    while (Get-Process -Name teardown -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }
+    $start = $p.StartTime
+    $game = $p
+    while ($game) {  # until no teardown.exe is left (one Steam starts in its place included)
+        Write-MemorySample $game $start
+        if ($game.WaitForExit(10000)) { $game = Get-Process -Name teardown -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    }
 }
 finally {
     & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
@@ -136,9 +181,39 @@ $changed = @(foreach ($f in Get-ChildItem $real -File -Recurse -Force) {
 if ($changed.Count) { Write-Output "WARNING: your real profile changed: $($changed -join ', ')" }
 else { Write-Output 'real profile untouched' }
 
+$mem = @(if (Test-Path $memCsv) { Import-Csv $memCsv })
+$samples = @($mem | Where-Object { $_.t_s -ne '' })
 $log = Join-Path $Out 'plugin.log'
 if (Test-Path $log) {
-    Write-Output 'Levels started, cuts, frame rates:'
-    Select-String -Path $log -Pattern '\] (level|frames|session): |tool: firing' | ForEach-Object { '  ' + $_.Line }
+    # the plugin's clock starts when it loads ('loaded 0.473 s after process start'), memory.csv's when the game starts
+    $loaded = Select-String -Path $log -Pattern 'loaded ([\d.]+) s after process start' | Select-Object -First 1
+    $offset = if ($loaded) { [double]$loaded.Matches[0].Groups[1].Value } else { 0.0 }
+    $i = 0
+    Write-Output 'Levels started, cuts, frame rates (with the game''s RAM and VRAM then):'
+    Select-String -Path $log -Pattern '\] (level|frames|session): |tool: firing' | ForEach-Object {
+        $line = '  ' + $_.Line
+        if ($samples.Count -and $_.Line -match '^\s*([\d.]+) .*\] frames: ') {
+            $t = [double]$Matches[1] + $offset  # the last sample before the end of the 10 s
+            while ($i + 1 -lt $samples.Count -and [double]$samples[$i + 1].t_s -le $t) { $i++ }
+            $m = $samples[$i]
+            if ($m.game_ram_mb -ne '' -and $m.game_vram_mb -ne '') {
+                $line += '; RAM {0:F1} GB, VRAM {1:F1} GB' -f ([double]$m.game_ram_mb / 1024), ([double]$m.game_vram_mb / 1024)
+            }
+        }
+        $line
+    }
+}
+if ($samples.Count) {
+    $gb = { param($rows, $k, $most) $v = @($rows | Where-Object { $_.$k -ne '' } | ForEach-Object { [double]$_.$k })
+            if (-not $v.Count) { return [double]::NaN }
+            $s = $v | Measure-Object -Maximum -Minimum
+            $(if ($most) { $s.Maximum } else { $s.Minimum }) / 1024 }
+    $baseline = @($mem | Where-Object { $_.time -eq 'before' })
+    Write-Output (('RAM and VRAM, every 10 s (memory.csv): the game used up to {0:F1} GB of RAM ({1:F1} GB of it in ' +
+        'RAM at most); the PC''s free RAM went down to {2:F1} GB ({3:F1} GB before the game). The game''s VRAM went up ' +
+        'to {4:F1} GB; the card''s, all programs together, up to {5:F1} GB ({6:F1} GB before the game).') -f
+        (& $gb $samples 'game_ram_mb' $true), (& $gb $samples 'game_inram_mb' $true), (& $gb $samples 'free_ram_mb' $false),
+        (& $gb $baseline 'free_ram_mb' $true), (& $gb $samples 'game_vram_mb' $true), (& $gb $samples 'card_vram_mb' $true),
+        (& $gb $baseline 'card_vram_mb' $true))
 }
 Write-Output "Session folder: $Out"
