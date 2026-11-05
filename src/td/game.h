@@ -1,4 +1,5 @@
-// Engine object accessors for Teardown 2.1.0 (offsets: research/docs/re-notes.md).
+// Engine object accessors for Teardown 2.2.0 (offsets: research/docs/re-notes.md; the ones used here are the same
+// as in 2.1.0, checked with tools/port_addresses.py and research/re/port/game_paths.tsv).
 #pragma once
 #include <cstdint>
 

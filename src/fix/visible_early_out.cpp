@@ -11,16 +11,18 @@
 namespace fix {
 namespace {
 
-// The ray loop's tail in 0x1404de770, from the raycast call to the first instruction after the loop:
-//   4ded24 call 0x1400e9920 ; 4ded29 test al,al ; 4ded2b jne 4ded32 ; 4ded2d minss xmm10,xmm9 (visible: nearest)
-//   4ded32 inc edi ; add rbx,0xc ; cmp edi,[rbp-0x10] ; jl loop ; 4ded41 mov rbx,[rbp-0x40] (after the loop)
-constexpr uint32_t kSite = 0x4ded24;
-constexpr uint8_t kExpect[] = {0xe8, 0xf7, 0xab, 0xc0, 0xff, 0x84, 0xc0, 0x75, 0x05, 0xf3, 0x45, 0x0f, 0x5d,
+// The ray loop's tail in 0x1404ec720 (2.2.0; 0x1404de770 in 2.1.0), from the raycast call to the first
+// instruction after the loop:
+//   4eccd6 call 0x1400f1850 ; 4eccdb test al,al ; 4eccdd jne 4ecce4 ; 4eccdf minss xmm10,xmm9 (visible: nearest)
+//   4ecce4 inc edi ; add rbx,0xc ; cmp edi,[rbp-0x10] ; jl loop ; 4eccf3 mov rbx,[rbp-0x40] (after the loop)
+// The frame is unchanged in 2.2.0: rbp = entry rsp - 0x1d8, so outDist (5th argument) is still [rbp+0x200].
+constexpr uint32_t kSite = 0x4eccd6;
+constexpr uint8_t kExpect[] = {0xe8, 0x75, 0x4b, 0xc0, 0xff, 0x84, 0xc0, 0x75, 0x05, 0xf3, 0x45, 0x0f, 0x5d,
                                0xd1, 0xff, 0xc7, 0x48, 0x83, 0xc3, 0x0c, 0x3b, 0x7d, 0xf0, 0x0f, 0x8c, 0xd3,
                                0xfe, 0xff, 0xff, 0x48, 0x8b, 0x5d, 0xc0};
-constexpr uint32_t kPatch = 0x4ded2d;  // minss xmm10, xmm9 (5 bytes): becomes jmp stub
-constexpr uint32_t kNext = 0x4ded32;   // the loop's increment
-constexpr uint32_t kExit = 0x4ded41;   // after the loop
+constexpr uint32_t kPatch = 0x4eccdf;  // minss xmm10, xmm9 (5 bytes): becomes jmp stub
+constexpr uint32_t kNext = 0x4ecce4;   // the loop's increment
+constexpr uint32_t kExit = 0x4eccf3;   // after the loop
 
 // Executable memory within +-2 GB of `target`, for a rel32 jump from there.
 void* AllocNear(uintptr_t target, size_t size) {

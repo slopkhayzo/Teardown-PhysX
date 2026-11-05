@@ -286,10 +286,10 @@ void CountVoxels(uint64_t& staticVox, uint64_t& dynamicVox) {
     --crash::t_tolerateFaults;
 }
 
-// The level now running, however it was started (menu, mods.play, the bench): StartLevel (0x140079b80) keeps its
-// descriptor at Game+0x538 (strings: +0x20 mission, +0x40 path, +0x60 layers, +0x80 mod).
+// The level now running, however it was started (menu, mods.play, the bench): StartLevel (0x14007b180) keeps its
+// descriptor at Game+0x570 (strings: +0x20 mission, +0x40 path, +0x60 layers, +0x80 mod). 2.1.0: Game+0x538.
 void LogLevel(void* game) {
-    const uint8_t* d = static_cast<const uint8_t*>(game) + 0x538;
+    const uint8_t* d = static_cast<const uint8_t*>(game) + 0x570;
     char mission[128], path[512], layers[256], mod[128];
     DescString(d + 0x20, mission, sizeof(mission));
     DescString(d + 0x40, path, sizeof(path));

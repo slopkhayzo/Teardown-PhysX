@@ -197,7 +197,7 @@ def synth(a):
             sys.exit(f'unknown step: {s}')
     total = max([frame_of(t)] + list(events)) + 1
     enc = lambda s, n: s.encode('latin-1')[:n - 1].ljust(n, b'\0')
-    out = [HEADER.pack(b'TDPXREC1', VERSION, HEADER.size, 0x6aa7b1de, FLAG_SYNTHETIC, enc(a.mod, 64),
+    out = [HEADER.pack(b'TDPXREC1', VERSION, HEADER.size, 0x6ae468bd, FLAG_SYNTHETIC, enc(a.mod, 64),
                        enc(a.level, 256), enc(a.layers, 128), enc(a.mission, 64), 0.0, 0.0, a.seed, 1920, 1080,
                        FRAME.size, b'\0' * 48)]
     for f in range(total):

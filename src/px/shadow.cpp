@@ -4615,15 +4615,15 @@ void* __fastcall HkShapeDtor(uint8_t* self, uint32_t flags) {
     return oShapeDtor(self, flags);
 }
 
-// NarrowWake's calls from contact processing, as return addresses: add-contact 0x1400acb40 and the manifold
-// loops in 0x1400b4850 / 0x1400b59a8. The other callers (vehicles, joints, wheels, script constraints) want to
-// constrain the body.
-constexpr uint32_t kContactWakeReturns[] = {0xacbae, 0xacbc5, 0xb49e3, 0xb4a0e, 0xb5a13, 0xb5a3d};
-// The player's constraints (0x1400bcd50) call it for the body the player stands on (player+0x8d8, from up to 16
-// queries under the feet: static ground first, else the heaviest), then wake that body themselves (0x140031330) and
-// add one constraint between the player and it. Their other NarrowWake call (return 0xbf385) is left to take
-// the body: there the player pushes it.
-constexpr uint32_t kPlayerGroundWakeReturn = 0xbdf34;
+// NarrowWake's calls from contact processing, as return addresses (Teardown 2.2.0): add-contact 0x1400b47c0 and the
+// manifold loops in 0x1400bc520 / 0x1400bd678 (2.1.0: 0x1400acb40, 0x1400b4850, 0x1400b59a8). The other callers
+// (vehicles, joints, wheels, script constraints) want to constrain the body.
+constexpr uint32_t kContactWakeReturns[] = {0xb482e, 0xb4845, 0xbc6b3, 0xbc6de, 0xbd6e3, 0xbd70d};
+// The player's constraints (0x1400c4aa0; 2.1.0: 0x1400bcd50) call it for the body the player stands on
+// (player+0x8d8, from up to 16 queries under the feet: static ground first, else the heaviest), then wake that body
+// themselves (0x140031cc0) and add one constraint between the player and it. Their other NarrowWake call (return
+// 0xc7165; 2.1.0: 0xbf385) is left to take the body: there the player pushes it.
+constexpr uint32_t kPlayerGroundWakeReturn = 0xc5d0c;
 
 // A contact with an owned body needs a solver slot (the solver maps every contact's body index through a table;
 // -1 reads outside it). Give the body a static one, as Physics::update does for static bodies each step: zero

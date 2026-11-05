@@ -331,9 +331,13 @@ bool StartLevelNative() {
     fromC(tmp, g_config.layers.c_str());
     copy(g_desc + 0x60, tmp);
     dtor(tmp);
-    copy(g_desc + 0xa0, game + 0x470);
-    td::At<uint8_t>(game, 0x828) = 0;
-    td::At<uint8_t>(game, 0x8ec) = 0;
+    // As Lua StartLevel does in 2.2.0 (0x1404c5d50): desc+0xc0 = Game+0x4a0, desc+0xe0 = Game+0x4c0, clear
+    // Game+0x8b0 and +0x97c. StartLevel computes desc+0xa0 itself now. (2.1.0: desc+0xa0 = Game+0x470, clear
+    // Game+0x828 and +0x8ec.)
+    copy(g_desc + 0xc0, game + 0x4a0);
+    td::At<uint8_t>(g_desc, 0xe0) = td::At<uint8_t>(game, 0x4c0);
+    td::At<uint8_t>(game, 0x8b0) = 0;
+    td::At<uint8_t>(game, 0x97c) = 0;
     inputrec::OnLevelStart();
     td::Fn<StartLevelFn>(Addr::StartLevel)(game, g_desc, false);
     Mark(kLevelRequested);
@@ -341,9 +345,10 @@ bool StartLevelNative() {
 }
 
 void SkipSplash() {
-    // What Lua Menu() does (0x1404b6530): clear Game+0x828, request MENU_LOADING.
+    // What Lua Menu() does (0x1404c43e0; 2.1.0: 0x1404b6530): clear Game+0x8b0 (2.1.0: +0x828), request
+    // MENU_LOADING.
     uint8_t* game = td::GameObj();
-    td::At<uint8_t>(game, 0x828) = 0;
+    td::At<uint8_t>(game, 0x8b0) = 0;
     td::Fn<RequestStateFn>(Addr::RequestState)(game, td::kMenuLoading, 0, 0);
     LOG("bench: splash skipped (requested MENU_LOADING)");
 }

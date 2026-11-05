@@ -37,10 +37,14 @@ void WINAPI HkGetSystemInfo(LPSYSTEM_INFO si) {
     if (si && ra > base && ra < base + td::kBuildImageSize) si->dwNumberOfProcessors = 2;  // one worker
 }
 
-// Job state at +0x08: 0 new, 2 queued, 3 running, 4 done. The queue holds a reference (+0x20).
+// Job state at +0x08: 0 new, 2 queued, 3 running, 4 ran, 5 done (2.2.0: JobRun sets 4, releases the jobs that
+// depend on it, then 5; the game's own wait returns on 5. In 2.1.0, 4 was the last state). The queue holds a
+// reference (+0x20).
+constexpr LONG kDone = 5;
+
 void __fastcall HkWait(uint8_t* job) {
     volatile LONG* state = reinterpret_cast<volatile LONG*>(job + 8);
-    if (*state == 4) return;
+    if (*state == kDone) return;
     void* manager = reinterpret_cast<void*>(td::VA(Addr::JobManagerPtr));
     if (*state == 0 && InterlockedCompareExchange(state, 2, 0) == 0) {
         td::Fn<EnqueueFn>(Addr::JobEnqueue)(manager, job);
@@ -48,7 +52,7 @@ void __fastcall HkWait(uint8_t* job) {
     }
     if (td::Fn<IsWorkerFn>(Addr::JobIsWorker)()) {
         // The only worker waits for another job: run queued jobs here until that one is done.
-        while (*state != 4) {
+        while (*state != kDone) {
             uint8_t* j = td::Fn<PopFn>(Addr::JobPop)(manager);
             if (!j) {
                 SwitchToThread();
@@ -65,7 +69,7 @@ void __fastcall HkWait(uint8_t* job) {
         return;
     }
     // Any other thread: the worker runs it (the extra worker that would stand in is not woken).
-    for (int spins = 0; *state != 4; ++spins) {
+    for (int spins = 0; *state != kDone; ++spins) {
         if (spins < 64)
             YieldProcessor();
         else

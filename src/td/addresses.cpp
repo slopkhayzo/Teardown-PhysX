@@ -10,7 +10,7 @@ namespace td {
 #define TD_CODE(name, rva, label, ...) {#name, rva, true, label, __VA_ARGS__},
 #define TD_DATA(name, rva) {#name, rva, false, "", {}},
 const AddrInfo kAddrs[static_cast<int>(Addr::Count)] = {
-#include "addresses_2_1_0.inc"
+#include "addresses_2_2_0.inc"
 };
 #undef TD_BUILD
 #undef TD_CODE
@@ -20,7 +20,7 @@ const AddrInfo kAddrs[static_cast<int>(Addr::Count)] = {
     const char* const kBuildVersion = ver;
 #define TD_CODE(name, rva, label, ...)
 #define TD_DATA(name, rva)
-#include "addresses_2_1_0.inc"
+#include "addresses_2_2_0.inc"
 #undef TD_BUILD
 #undef TD_CODE
 #undef TD_DATA
