@@ -364,7 +364,8 @@ def main():
     spb = [(idx, r) for idx, r in enumerate(recs) if name_of(r[2]) == 'split_per_body']
     if spb:
         say('slowest split_per_body calls (shape-level connectivity of a multi-shape body):')
-        say('       ms  rounds  floods  queries (ms)  touch tests (unique, ms)')
+        say('       ms  rounds  floods  queries (ms)  touch tests (unique, ms)  [body: handle static/dynamic shapes, '
+            'new bodies made]')
         rows = []
         for idx, r in spb:
             t0, t1, tid = r[0], r[1], r[3]
@@ -384,12 +385,41 @@ def main():
                     pairs.add(q[4] & ((1 << 62) - 1))
                     if q[4] >> 63:
                         cnt['touch_hit'] += 1
-            rows.append(((t1 - t0) * ms, cnt, tms, len(pairs)))
-        for d, cnt, tms, up in sorted(rows, key=lambda x: -x[0])[:a.top]:
+            rows.append(((t1 - t0) * ms, cnt, tms, len(pairs), r[4]))
+
+        def body_of(arg):  # hooks.cpp PreSplitPerBody (traced runs since 2026-11-24)
+            return (arg >> 37) & 0x3ffffff, (arg >> 36) & 1, arg & 0xffffff, (arg >> 24) & 0xfff
+
+        for d, cnt, tms, up, arg in sorted(rows, key=lambda x: -x[0])[:a.top]:
+            h, dyn, nshapes, made = body_of(arg)
             say(f'  {d:7.2f}  {cnt["split_group_bodies"]:6d}  {cnt["split_flood"]:6d}  '
                 f'{cnt["scene_query_shapes"]:6d} ({tms["scene_query_shapes"]:6.2f})  '
                 f'{cnt["shape_touch_test"]:7d} ({up}, {tms["shape_touch_test"]:6.2f})'
-                + (f'  cache hits {cnt["touch_hit"]}' if cnt['touch_hit'] else ''))
+                + (f'  cache hits {cnt["touch_hit"]}' if cnt['touch_hit'] else '')
+                + (f'  [body {h} {"dynamic" if dyn else "static"} {nshapes} shapes, made {made}]' if nshapes else ''))
+        if any(x[4] for x in rows):
+            per = collections.defaultdict(lambda: [0, 0.0, 0, 0, 0, 0, 0])  # calls ms made calls-made shapes dyn rounds
+            for d, cnt, tms, up, arg in rows:
+                h, dyn, nshapes, made = body_of(arg)
+                e = per[h]
+                e[0] += 1
+                e[1] += d
+                e[2] += made
+                e[3] += made > 0
+                e[4] = max(e[4], nshapes)
+                e[5] = dyn
+                e[6] += cnt['split_group_bodies']
+            say('split_per_body by body (the 8 costliest): handle, static/dynamic, most shapes seen, calls, ms, rounds, '
+                'calls that made new bodies, new bodies')
+            for h, e in sorted(per.items(), key=lambda kv: -kv[1][1])[:8]:
+                say(f'  body {h:7d} {"dynamic" if e[5] else "static ":7s} {e[4]:6d} shapes  {e[0]:6d} calls '
+                    f'{e[1]:8.1f} ms  {e[6]:6d} rounds  {e[3]:5d} made  {e[2]:5d} new')
+            tcalls = len(rows)
+            tmade = sum(1 for x in rows if body_of(x[4])[3] > 0)
+            tms_made = sum(x[0] for x in rows if body_of(x[4])[3] > 0)
+            say(f'  calls that made new bodies: {tmade} of {tcalls} ({tms_made:.1f} of {sum(x[0] for x in rows):.1f} '
+                f'ms); static bodies: {sum(x[0] for x in rows if not body_of(x[4])[1]):.1f} ms')
+
         tot = sum(x[0] for x in rows)
         tt = sum(x[2]['shape_touch_test'] for x in rows)
         tq = sum(x[2]['scene_query_shapes'] for x in rows)

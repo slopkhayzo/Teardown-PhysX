@@ -13,6 +13,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "fix/static_body_update.h"
 #include "fix/touch_cache.h"
 #include "input/recorder.h"
 #include "px/shadow.h"
@@ -731,6 +732,7 @@ void BrowseFrameStats() {
 
 void Quit(bool ok) {
     if (g_config.touchCache) fix::LogTouchCacheStats();
+    if (g_config.staticBodyUpdate) fix::LogStaticBodyUpdateStats();
     shadow::OnLeavePlay();  // PhysX shadow totals
     trace::Flush();
     LOG("session: terminating the game (%s)", ok ? "done" : "failed");

@@ -11,14 +11,14 @@
 namespace fix {
 namespace {
 
-// The size test of the rubble cleanup in 0x1400f89a0 (2.2.0; 0x1400f0c30 in 2.1.0):
-//   f8d32 mov rcx,[rbx+0xf0] ; test rcx,rcx ; je skip ; mov eax,[rcx+8] ; add eax,[rcx+4] ; add eax,[rcx]
-//   f8d4a cmp eax,0x32 ; f8d4d jge skip (0x1400f92aa, the next body)
-constexpr uint32_t kSite = 0xf8d32;
+// The size test of the rubble cleanup in 0x1400f8160 (2.2.0.20261118; 0x1400f89a0 in 2.2.0, 0x1400f0c30 in 2.1.0):
+//   f84f2 mov rcx,[rbx+0xf0] ; test rcx,rcx ; je skip ; mov eax,[rcx+8] ; add eax,[rcx+4] ; add eax,[rcx]
+//   f850a cmp eax,0x32 ; f850d jge skip (the next body)
+constexpr uint32_t kSite = 0xf84f2;
 constexpr uint8_t kExpect[] = {0x48, 0x8b, 0x8b, 0xf0, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc9, 0x0f,
                                0x84, 0x68, 0x05, 0x00, 0x00, 0x8b, 0x41, 0x08, 0x03, 0x41, 0x04,
                                0x03, 0x01, 0x83, 0xf8, 0x32, 0x0f, 0x8d, 0x57, 0x05, 0x00};
-constexpr uint32_t kLimit = 0xf8d4c;  // the 0x32 of cmp eax,0x32
+constexpr uint32_t kLimit = 0xf850c;  // the 0x32 of cmp eax,0x32
 
 }  // namespace
 

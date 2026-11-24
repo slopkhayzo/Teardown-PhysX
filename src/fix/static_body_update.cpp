@@ -29,10 +29,10 @@ namespace {
 using BodyUpdateFn = void(__fastcall*)(uint8_t* body);
 BodyUpdateFn oUpdate = nullptr;
 
-// return addresses of the two calls: split/finish's inline per-body loop (0x140142ec3) and its twin (0x140143534)
-// (2.2.0; 0x14013ac53 / 0x14013b2c4 in 2.1.0)
-constexpr uintptr_t kSplitFinish = 0x142ec8;
-constexpr uintptr_t kSplitTwin = 0x143539;
+// return addresses of the two calls: split/finish's inline per-body loop (0x1401425b3) and its twin (0x140142c24)
+// (2.2.0.20261118; 0x140142ec3 / 0x140143534 in 2.2.0, 0x14013ac53 / 0x14013b2c4 in 2.1.0)
+constexpr uintptr_t kSplitFinish = 0x1425b8;
+constexpr uintptr_t kSplitTwin = 0x142c29;
 
 // A split does add shapes to the static body: carving a static shape apart makes new shapes for its pieces, and
 // those still holding on stay in it. They are made with flags 0x30 and need the static bits (0x35). Where they land

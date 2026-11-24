@@ -9,8 +9,9 @@ cost next to nothing. The rest stays the game's: destruction, the player, vehicl
 
 Requirements
 ------------
-- Teardown 2.2.0, the Steam version (for 2.1.0: Teardown-PhysX 1.0.0). At start the plugin checks the game's
-  code: with any other version it stays off and the game runs unmodified, until an update of the plugin.
+- Teardown 2.2.0 as updated on 18 November 2026, the Steam version (for 2.2.0 before that update: Teardown-PhysX
+  1.0.1; for 2.1.0: 1.0.0). At start the plugin checks the game's code: with any other version it stays off and the
+  game runs unmodified, until an update of the plugin.
 - Windows 10 or 11, 64-bit.
 - PhysX on the GPU: an NVIDIA GeForce GTX 16 / RTX 20 series or newer (or a Volta or newer workstation card), with
   a driver that supports CUDA 12.8 (driver 570 or newer). Without one, PhysX runs on the CPU.

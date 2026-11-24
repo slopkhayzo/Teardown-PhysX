@@ -11,7 +11,7 @@
 An ASI plugin for Teardown (Steam, 2.2.0) that hands free debris to NVIDIA PhysX 5 (on the GPU or the CPU) and
 fixes stutters in the game's destruction code. Ultimate ASI Loader loads it as the game's `dxgi.dll`.
 
-Current release: **v1.0.1** (for Teardown 2.2.0)
+Current release: **v1.0.2** (for Teardown 2.2.0 as updated on 18 November 2026)
 
 ## Install
 

@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 
 #include "bench/bench.h"
@@ -181,6 +182,36 @@ void PreVoxRegion(HookCtx* c, uint64_t* g, void*, uint64_t* st) {
     t_arg[c->id] = uint64_t(vol) | (sv << 32);
 }
 
+// SplitPerBody(ctx, body): arg = the body's shapes (24 bits) | new bodies the call made (ctx+0x1160, 12 bits) << 24 |
+// dynamic << 36 | body handle (26 bits) << 37. Only when tracing.
+thread_local uint8_t* t_spbCtx = nullptr;
+void PreSplitPerBody(HookCtx* c, uint64_t* g, void*, uint64_t*) {
+    t_spbCtx = nullptr;
+    if (!g_config.traceEnabled) return;
+    t_spbCtx = reinterpret_cast<uint8_t*>(g[0]);
+    uint8_t* body = reinterpret_cast<uint8_t*>(g[1]);
+    uint64_t shapes = 0, dyn = 0, handle = 0;
+    if (body) {
+        // recounted every 64th call: a walk of a 6,000-shape static body per call cost seconds in a replay
+        static std::unordered_map<uint8_t*, std::pair<uint32_t, uint32_t>> counts;  // (split runs on the main thread)
+        auto& cnt = counts[body];
+        if (cnt.second++ % 64 == 0) {
+            uint32_t n = 0;
+            for (uint8_t* e = td::At<uint8_t*>(body, 0x28); e && n < 0xffffff; e = td::At<uint8_t*>(e, 0x18))
+                n += td::EntityType(e) == 2;
+            cnt.first = n;
+        }
+        shapes = cnt.first;
+        dyn = td::BodyDynamic(body) ? 1 : 0;
+        handle = uint32_t(td::At<int>(body, 0x0c)) & 0x3ffffff;
+    }
+    t_arg[c->id] = shapes | (dyn << 36) | (handle << 37);
+}
+uint64_t PostSplitPerBody(HookCtx*, uint64_t arg) {
+    const int made = t_spbCtx ? td::At<int>(t_spbCtx, 0x1160) : 0;
+    return arg | (uint64_t(uint32_t(made) & 0xfff) << 24);
+}
+
 // ShapeTouchTest(physics, shapeA, shapeB): arg = order-independent hash of the pair (to count unique pairs).
 void PreTouchPair(HookCtx* c, uint64_t* g, void*, uint64_t*) {
     uint64_t a = g[1], b = g[2];
@@ -213,6 +244,7 @@ const HookSpec kSpecs[] = {
     {Addr::VoxRegionFinish, PreVoxVolume, nullptr},
     {Addr::VoxRegionCcl, PreVoxVolumeIndirect, nullptr},
     {Addr::ShapeTouchTest, PreTouchPair, nullptr},
+    {Addr::SplitPerBody, PreSplitPerBody, PostSplitPerBody},
     {Addr::GameLog, PreGameLog, nullptr},
 };
 

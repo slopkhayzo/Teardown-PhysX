@@ -194,6 +194,7 @@ void Config::Load(const std::string& path) {
     touchCache = ReadBool(path, "Fix", "TouchCache", touchCache);
     touchCacheValidate = int(ReadNum(path, "Fix", "TouchCacheValidate", touchCacheValidate));
     touchCacheSymmetric = ReadBool(path, "Fix", "TouchCacheSymmetric", touchCacheSymmetric);
+    touchCacheKeepApart = ReadBool(path, "Fix", "TouchCacheKeepApart", touchCacheKeepApart);
     staticBodyUpdate = ReadBool(path, "Fix", "StaticBodyUpdate", staticBodyUpdate);
     staticBodyUpdateValidate = int(ReadNum(path, "Fix", "StaticBodyUpdateValidate", staticBodyUpdateValidate));
     visibleEarlyOut = ReadBool(path, "Fix", "VisibleEarlyOut", visibleEarlyOut);

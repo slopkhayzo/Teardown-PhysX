@@ -8,7 +8,7 @@ enum class Addr : int {
 #define TD_BUILD(stamp, size, ver)
 #define TD_CODE(name, rva, label, ...) name,
 #define TD_DATA(name, rva) name,
-#include "addresses_2_2_0.inc"
+#include "addresses_2_2_0_20261118.inc"
 #undef TD_BUILD
 #undef TD_CODE
 #undef TD_DATA

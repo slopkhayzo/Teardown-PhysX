@@ -41,6 +41,7 @@ if ($Queue) {
     $job = [ordered]@{
         name = 'Teardown play session (user at the keyboard): browse levels'
         owner = 'Teardown-PhysX'
+        atomic = $true  # a game launch: the machine to itself (the queue runs other jobs side by side otherwise)
         workingDirectory = $repo
         timeoutMinutes = $TimeoutMinutes
         continueOnError = $false

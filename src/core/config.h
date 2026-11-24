@@ -233,6 +233,8 @@ struct Config {
     bool touchCache = true;         // memoise the shape-touch test (src/fix/touch_cache.h): 0 mismatches in 56k checks
     int touchCacheValidate = 16;    // re-check every Nth hit against the engine (0 = never)
     bool touchCacheSymmetric = true;
+    // "apart" answers survive voxel removal (exact: a hole can't create contact); off until validated more widely
+    bool touchCacheKeepApart = false;
     // a split doesn't refresh the static body it cut from (src/fix/static_body_update.h); every Nth skip is checked
     bool staticBodyUpdate = true;
     int staticBodyUpdateValidate = 64;

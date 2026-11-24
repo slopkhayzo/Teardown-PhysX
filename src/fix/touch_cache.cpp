@@ -5,6 +5,7 @@
 #include <MinHook.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -44,6 +45,16 @@ struct Entry {
 std::unordered_map<uint64_t, Entry> g_cache;
 std::unordered_map<const void*, uint32_t> g_epoch;  // bumped when MakeHole works on a shape
 uint64_t g_hits = 0, g_misses = 0, g_stale = 0, g_validated = 0, g_mismatch = 0, g_bypass = 0;
+
+// Why an entry found for the pair was stale (diagnostics: what a finer invalidation could keep). "Carved": same
+// buffer, dims and placement, fewer solid voxels; "epoch": nothing differs but the MakeHole epoch.
+enum { kStaleShape, kStaleMoved, kStaleGrew, kStaleCarved0, kStaleCarved1, kStaleEpoch0, kStaleEpoch1, kStaleKinds };
+uint64_t g_staleWhy[kStaleKinds] = {}, g_staleChanged[kStaleKinds] = {};  // ...and the engine's answer differed
+uint64_t g_staleTicks[kStaleKinds] = {}, g_newTicks = 0;  // time in the engine's test for those misses / new pairs
+uint64_t g_clears = 0;  // the whole cache dropped at its size limit
+// [Fix] TouchCacheKeepApart: "apart" entries kept through voxel removal (by stale kind: carved, epoch only), checked
+// against the engine every TouchCacheValidate-th time like the other hits
+uint64_t g_keptApart[2] = {}, g_keptValidated = 0, g_keptMismatch = 0;
 
 uint32_t EpochOf(const uint8_t* shape) {
     auto it = g_epoch.find(shape);
@@ -96,6 +107,19 @@ bool Close(const float* x, const float* y, int n, float eps) {
     return true;
 }
 
+int StaleReason(const Entry& e, const Side& sa, const Side& sb, const float* rp, const float* rr) {
+    auto same = [](const Side& x, const Side& y) {
+        return x.handle == y.handle && x.vox == y.vox && x.dims[0] == y.dims[0] && x.dims[1] == y.dims[1] &&
+               x.dims[2] == y.dims[2];
+    };
+    if (!same(e.a, sa) || !same(e.b, sb)) return kStaleShape;
+    if (!Close(e.relPos, rp, 3, 1e-4f) || !Close(e.relRot, rr, 4, 1e-5f)) return kStaleMoved;
+    if (sa.count > e.a.count || sb.count > e.b.count) return kStaleGrew;
+    const bool touching = (e.ret & 0xff) != 0;
+    if (sa.count < e.a.count || sb.count < e.b.count) return touching ? kStaleCarved1 : kStaleCarved0;
+    return touching ? kStaleEpoch1 : kStaleEpoch0;
+}
+
 uint64_t Key(uint8_t* a, uint8_t* b, bool& swapped) {
     uint32_t ha = uint32_t(td::At<int>(a, 0x0c)), hb = uint32_t(td::At<int>(b, 0x0c));
     swapped = g_config.touchCacheSymmetric && ha > hb;
@@ -120,37 +144,68 @@ uint64_t __fastcall HkTouch(void* physics, uint8_t* a, uint8_t* b) {
     float rp[3], rr[4];
     if (sides) Relative(first, second, rp, rr);
     uint64_t tag = (key * 0x9E3779B97F4A7C15ull) >> 2;  // pair id for the trace (low 62 bits)
+    int why = -1;
+    uint64_t whyRet = 0;
     if (sides) {
         auto it = g_cache.find(key);
         if (it != g_cache.end()) {
-            const Entry& e = it->second;
-            if (SameSide(e.a, sa) && SameSide(e.b, sb) && Close(e.relPos, rp, 3, 1e-4f) &&
-                Close(e.relRot, rr, 4, 1e-5f)) {
+            Entry& e = it->second;
+            const bool same = SameSide(e.a, sa) && SameSide(e.b, sb) && Close(e.relPos, rp, 3, 1e-4f) &&
+                              Close(e.relRot, rr, 4, 1e-5f);
+            // "Apart" survives voxel removal: the test looks for a pair of solid voxels within reach of each other,
+            // and a hole only takes voxels away. Same buffers, dims and placement, no voxel gained (StaleReason
+            // "carved" or "epoch only"): still apart. The stored sides move on to the current ones.
+            const int kind = same ? -1 : StaleReason(e, sa, sb, rp, rr);
+            const bool kept = g_config.touchCacheKeepApart && (kind == kStaleCarved0 || kind == kStaleEpoch0);
+            if (same || kept) {
                 ++g_hits;
                 uint64_t ret = e.ret;
-                int every = g_config.touchCacheValidate;
-                if (every > 0 && g_hits % uint64_t(every) == 0) {
-                    ++g_validated;
+                bool check = false;
+                const int every = g_config.touchCacheValidate;
+                if (kept) {
+                    ++g_keptApart[kind == kStaleCarved0 ? 0 : 1];
+                    e.a = sa;
+                    e.b = sb;
+                    check = every > 0 && (g_keptApart[0] + g_keptApart[1]) % uint64_t(every) == 0;
+                } else {
+                    check = every > 0 && g_hits % uint64_t(every) == 0;
+                }
+                if (check) {
+                    ++(kept ? g_keptValidated : g_validated);
                     uint64_t truth = oTouch(physics, a, b);
                     if ((truth & 0xff) != (ret & 0xff)) {
-                        ++g_mismatch;
-                        if (g_mismatch <= 20)
-                            LOG("touch cache MISMATCH: shapes %d/%d cached %d, engine %d", sa.handle, sb.handle,
-                                int(ret & 0xff), int(truth & 0xff));
+                        ++(kept ? g_keptMismatch : g_mismatch);
+                        if (g_mismatch + g_keptMismatch <= 20)
+                            LOG("touch cache MISMATCH%s: shapes %d/%d cached %d, engine %d",
+                                kept ? " (kept apart through removal)" : "", sa.handle, sb.handle, int(ret & 0xff),
+                                int(truth & 0xff));
                         ret = truth;
-                        it->second.ret = truth;
+                        e.ret = truth;
                     }
                 }
                 trace::Emit(trace::kTouchTest, t0, trace::Now(), tag | (1ull << 63));
                 return ret;
             }
             ++g_stale;
+            why = kind;
+            whyRet = e.ret;
+            ++g_staleWhy[why];
         }
     }
     ++g_misses;
+    const uint64_t te = trace::Now();
     uint64_t r = oTouch(physics, a, b);
+    if (why >= 0) {
+        g_staleTicks[why] += trace::Now() - te;
+        if ((r & 0xff) != (whyRet & 0xff)) ++g_staleChanged[why];
+    } else {
+        g_newTicks += trace::Now() - te;
+    }
     if (sides) {
-        if (g_cache.size() > 400000) g_cache.clear();
+        if (g_cache.size() > 400000) {
+            g_cache.clear();
+            ++g_clears;
+        }
         Entry e{sa, sb, {rp[0], rp[1], rp[2]}, {rr[0], rr[1], rr[2], rr[3]}, r};
         g_cache[key] = e;
     }
@@ -194,6 +249,21 @@ void LogTouchCacheStats() {
         "%llu off-main-thread",
         total, g_hits, total ? 100.0 * double(g_hits) / double(total) : 0.0, g_misses, g_stale, g_validated,
         g_mismatch, g_bypass);
+    static const char* kWhy[kStaleKinds] = {"other buffer or dims", "moved", "grew", "carved, cached apart",
+                                             "carved, cached touching", "epoch only, cached apart",
+                                             "epoch only, cached touching"};
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const double ms = 1000.0 / double(f.QuadPart);
+    char line[900];
+    int len = 0;
+    for (int k = 0; k < kStaleKinds && len < int(sizeof(line)) - 100; ++k)
+        len += std::snprintf(line + len, sizeof(line) - size_t(len), "%s%s %llu (answer changed %llu, %.0f ms)",
+                             k ? "; " : "", kWhy[k], g_staleWhy[k], g_staleChanged[k], double(g_staleTicks[k]) * ms);
+    LOG("touch cache: stale entries: %s; new pairs %.0f ms; %zu entries, cleared at the limit %llu times", line,
+        double(g_newTicks) * ms, g_cache.size(), g_clears);
+    LOG("touch cache: kept apart through voxel removal: %llu carved, %llu epoch only; %llu of them checked against the "
+        "engine, %llu mismatches", g_keptApart[0], g_keptApart[1], g_keptValidated, g_keptMismatch);
 }
 
 }  // namespace fix
