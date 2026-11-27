@@ -166,6 +166,7 @@ void WriteMeta() {
     g_names[kPxCompare] = "px_compare";
     g_names[kPxWriteBack] = "px_writeback";
     if (g_names[kBodyUpdate].empty()) g_names[kBodyUpdate] = "split_newbody_update";
+    if (g_names[kSceneQuery].empty()) g_names[kSceneQuery] = "scene_query_shapes";
     std::fprintf(f, "  \"events\": {");
     bool first = true;
     for (int i = 0; i < 256; ++i) {

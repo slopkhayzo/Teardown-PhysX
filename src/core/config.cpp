@@ -31,6 +31,7 @@ void Config::Load(const std::string& path) {
         pxShadow = 0;
         pxGpu = false;
         keepDebris = false;
+        destructionBudgetMs = 0.0f;  // (the benchmarks before 2026-11-27 had no budget)
     }
     traceEnabled = ReadBool(path, "Trace", "Enabled", traceEnabled);
     outDir = ReadStr(path, "Trace", "OutDir", outDir);
@@ -197,6 +198,11 @@ void Config::Load(const std::string& path) {
     touchCacheKeepApart = ReadBool(path, "Fix", "TouchCacheKeepApart", touchCacheKeepApart);
     staticBodyUpdate = ReadBool(path, "Fix", "StaticBodyUpdate", staticBodyUpdate);
     staticBodyUpdateValidate = int(ReadNum(path, "Fix", "StaticBodyUpdateValidate", staticBodyUpdateValidate));
+    splitQueries = ReadBool(path, "Fix", "SplitQueries", splitQueries);
+    splitQueriesValidate = int(ReadNum(path, "Fix", "SplitQueriesValidate", splitQueriesValidate));
+    destructionBudgetMs = float(ReadNum(path, "Fix", "DestructionBudgetMs", destructionBudgetMs));
+    destructionMaxWaitTicks = int(ReadNum(path, "Fix", "DestructionMaxWaitTicks", destructionMaxWaitTicks));
+    destructionBudgetScripts = ReadBool(path, "Fix", "DestructionBudgetScripts", destructionBudgetScripts);
     visibleEarlyOut = ReadBool(path, "Fix", "VisibleEarlyOut", visibleEarlyOut);
     keepDebris = ReadBool(path, "Fix", "KeepDebris", keepDebris);
     splitJobsMin = int(ReadNum(path, "Fix", "SplitJobsMin", splitJobsMin));

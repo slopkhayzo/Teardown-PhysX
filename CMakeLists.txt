@@ -56,6 +56,8 @@ add_library(TeardownPhysX SHARED
     src/fix/keep_debris.cpp
     src/fix/split_jobs.cpp
     src/fix/static_body_update.cpp
+    src/fix/split_queries.cpp
+    src/fix/destruction_budget.cpp
     src/fix/serial_jobs.cpp
     src/input/recorder.cpp
     src/px/colliders.cpp

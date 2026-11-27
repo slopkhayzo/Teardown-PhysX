@@ -13,6 +13,8 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "fix/destruction_budget.h"
+#include "fix/split_queries.h"
 #include "fix/static_body_update.h"
 #include "fix/touch_cache.h"
 #include "input/recorder.h"
@@ -472,7 +474,9 @@ bool StaticBodyAlive(uint8_t* body) {
 void DrainCarves() {
     if (g_carveQueue.empty()) return;
     const uint64_t t0 = trace::Now();
-    const double budget = std::max(0.0, double(g_config.toolCarveMsPerTick) - g_frameCarveMs);
+    // the tool's own budget, and what [Fix] DestructionBudgetMs leaves of the frame's (all holes made in it so far)
+    const double budget = std::min(std::max(0.0, double(g_config.toolCarveMsPerTick) - g_frameCarveMs),
+                                   fix::DestructionBudgetLeftMs());
     if (budget <= 0.0) return;  // this frame's carving is done: the next frame goes on
     double ms = 0.0;
     uint8_t* checked = nullptr;
@@ -733,6 +737,8 @@ void BrowseFrameStats() {
 void Quit(bool ok) {
     if (g_config.touchCache) fix::LogTouchCacheStats();
     if (g_config.staticBodyUpdate) fix::LogStaticBodyUpdateStats();
+    if (g_config.splitQueries) fix::LogSplitQueriesStats();
+    fix::LogDestructionBudgetStats();
     shadow::OnLeavePlay();  // PhysX shadow totals
     trace::Flush();
     LOG("session: terminating the game (%s)", ok ? "done" : "failed");

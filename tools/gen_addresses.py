@@ -118,6 +118,7 @@ ENTRIES = [
     ('BodyUpdateShapes',     0x02e510, 'code', ''),   # (body, swept, updateTree): shapes' world AABBs, tree placement
     ('NarrowWake',           0x0b52f0, 'code', ''),   # (physics, body): wake a body something touches, add to solver
     ('LuaIsBodyActive',      0x48bf20, 'code', ''),   # Lua IsBodyActive(handle) = body+0x140 != 0
+    ('LuaMakeHole',          0x48ef50, 'code', ''),   # Lua MakeHole(pos, r0, r1, r2, silent): (script, args, ret)
     ('LuaArgInt',            0x640d80, 'code', ''),   # (args, index, default) -> int
     ('LuaPushBool',          0x63f830, 'code', ''),   # (ret, bool)
     ('SolverAddBody',        0x60aec0, 'code', ''),   # TSolver::addBody(solver, pose, com, invMass, invInertia, ...)
@@ -143,6 +144,12 @@ ENTRIES = [
     ('MaterialStrength',     0xc14708, 'data', ''),   # float per material type: contact break strength (x 1200)
     ('ShapeCtor',            0x4e9e10, 'code', ''),   # Shape::Shape(this, parent): flags start at 0x30 (no static/dynamic bits)
     ('ShapeVftable',         0xa65408, 'data', ''),   # Shape's vftable: a live shape starts with it (dead: Entity's)
+    # broadphase AABB trees (physics+8.. +0x30: two static, two per dynamic state; leaves hold the shapes' exact boxes)
+    ('TreeInsert',           0x52f5d0, 'code', ''),   # (treeRef, &min, &max, shape) -> node
+    ('TreeUpdateLeaf',       0x530450, 'code', ''),   # (treeRef, node, &min, &max)
+    ('TreeRemove',           0x52f6a0, 'code', ''),   # (treeRef, node)
+    ('TreeClear',            0x52f510, 'code', ''),   # (treeRef): frees every node, a new empty tree object
+    ('ListReserve',          0x0e05e0, 'code', ''),   # (list {count, cap, data, inline}, capacity): engine-allocated
 ]
 
 

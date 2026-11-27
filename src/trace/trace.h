@@ -20,6 +20,11 @@ enum : uint32_t {
     kPxCompare = 209,         // compare PhysX's step with the native one
     kPxWriteBack = 210,       // offload: PhysX results into the game's bodies; arg = bodies written
     kBodyUpdate = 211,        // 0x14002e180 via [Fix] StaticBodyUpdate: arg = body handle | skipped << 63
+    kSceneQuery = 212,        // the scene shape query via [Fix] SplitQueries: arg = shapes found | from the mirror << 63
+    kMakeHoleCore = 213,      // MakeHoleCore via [Fix] DestructionBudgetMs ("makehole_core", as the timed hook's):
+                              // arg = voxels removed | spheres << 32 | made from the queue << 62 | a target body << 63
+    kHoleQueued = 214,        // [Fix] DestructionBudgetMs queued a hole call: arg = source (0 the game's impact
+                              // damage, 1 PhysX's, 2 a script's) | spheres << 8; t0 == t1
 };
 
 struct Record {

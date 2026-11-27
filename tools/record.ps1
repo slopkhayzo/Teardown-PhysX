@@ -97,6 +97,22 @@ if (-not $InQueue -and -not $Force -and ((& $queueCmd status) -match '^RUNNING')
 }
 New-Item -ItemType Directory -Force $rec | Out-Null
 
+# Your own install of the plugin (a release zip in the game folder: dxgi.dll, TeardownPhysX.asi, its ini and logs) is
+# moved aside for the session and put back afterwards, hashes checked (research\scripts\user_install_aside.ps1, as the
+# test jobs do; without that script install.ps1 refuses to replace it). A session that ended before putting it back
+# left it in the backup: it is put back at the end of this one.
+$asideScript = Join-Path $repo 'research\scripts\user_install_aside.ps1'
+function Set-UserInstallAside {
+    if (-not (Test-Path $asideScript)) { return }
+    if (Test-Path (Join-Path $repo 'research\backups\user-install-20261105\manifest.json')) {
+        Write-Output 'your own install is still set aside from an earlier session: it is put back at the end'
+        return
+    }
+    if (Test-Path (Join-Path $GameDir 'TeardownPhysX.install.json')) { return }  # a test install: install.ps1 replaces it
+    & $asideScript -Aside -GameDir $GameDir
+}
+function Restore-UserInstall { if (Test-Path $asideScript) { & $asideScript -Restore -GameDir $GameDir } }
+
 # Profile copy: settings, progress and mod lists (so the same mods are enabled). The real profile is not touched.
 $real = Join-Path $env:LOCALAPPDATA 'Teardown'
 $start = Join-Path $rec 'appdata-start\Teardown'
@@ -140,8 +156,9 @@ Copy-Item $Asi $rec -Force
 # a pinned build brings its own GPU module (research\builds\<name>\PhysXGpu_64.dll), else build\'s
 $beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
 $gpuDll = if (Test-Path $beside) { $beside } else { '' }
-& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $rec 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
+Set-UserInstallAside
 try {
+    & (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $rec 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
     $env:TDPX_INI = $ini
     $env:SteamAppId = '1167630'
     $env:SteamGameId = '1167630'
@@ -152,7 +169,8 @@ try {
     while (Get-Process -Name teardown -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }
 }
 finally {
-    & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
+    try { & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir }
+    finally { Restore-UserInstall }
 }
 $changed = @(foreach ($f in Get-ChildItem $real -File -Recurse -Force) {
     if ($before[$f.FullName] -ne (Get-FileHash $f.FullName).Hash) { $f.FullName }

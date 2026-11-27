@@ -15,10 +15,12 @@
 #include "core/config.h"
 #include "core/crash.h"
 #include "core/log.h"
+#include "fix/destruction_budget.h"
 #include "fix/serial_jobs.h"
 #include "fix/touch_cache.h"
 #include "fix/keep_debris.h"
 #include "fix/split_jobs.h"
+#include "fix/split_queries.h"
 #include "fix/static_body_update.h"
 #include "fix/visible_early_out.h"
 #include "input/recorder.h"
@@ -78,10 +80,12 @@ void PreFrame(HookCtx*, uint64_t*, void*, uint64_t*) {
     if (!mainSet) {
         mainSet = true;
         fix::SetMainThread(GetCurrentThreadId());
+        fix::SplitQueriesSetMainThread(GetCurrentThreadId());
         sampler::SetMainThread(GetCurrentThreadId());
         threads::SetMainThread(GetCurrentThreadId());
     }
     crash::Heartbeat();
+    fix::DestructionFrameStart();
     inputrec::OnFrameStart();
     bench::OnFrame();
 }
@@ -111,6 +115,7 @@ uint64_t PostFrame(HookCtx*, uint64_t) {
 void PreSceneUpdate(HookCtx*, uint64_t*, void*, uint64_t*) {
     inputrec::OnTick();
     census::OnTick();
+    fix::DestructionTick();  // holes waiting from earlier frames, before the debris tool's and the scripts'
     bench::OnTick();
 }
 uint64_t PostSceneUpdate(HookCtx*, uint64_t) {
@@ -354,12 +359,22 @@ void __fastcall HkStateSwitch(void* game, int state) {
     oStateSwitch(game, state);
     trace::Emit(trace::kStateSwitch, t0, trace::Now(), uint32_t(old) | (uint64_t(uint32_t(state)) << 32));
     LOG("state %s -> %s", td::StateName(old), td::StateName(state));
-    if (state == td::kLoading || state == td::kMenuLoading) fix::OnLevelChange();
+    if (state == td::kLoading || state == td::kMenuLoading) {
+        fix::OnLevelChange();
+        fix::SplitQueriesLevelChange();
+        fix::DestructionLevelChange();
+    }
     if (old == td::kPlay && g_config.touchCache) fix::LogTouchCacheStats();
     if (old == td::kPlay && g_config.staticBodyUpdate) fix::LogStaticBodyUpdateStats();
+    if (old == td::kPlay && g_config.splitQueries) fix::LogSplitQueriesStats();
+    if (old == td::kPlay && state != td::kPlay) {
+        fix::LogDestructionBudgetStats();
+        fix::DestructionLevelChange();
+    }
     if (state == td::kPlay) {
         crash::SetWatch(true);
         LogLevel(game);
+        if (g_config.splitQueries) fix::SplitQueriesLevelStart();
     }
     bench::OnState(old, state);
 }
@@ -402,6 +417,8 @@ bool InstallApiHooks() {
 
 bool InstallEngineHooks() {
     int timed = 0, skipped = 0;
+    // [Fix] DestructionBudgetMs hooks MakeHoleCore itself (and times it): before the timed hooks, which then skip it
+    if (g_config.destructionBudgetMs > 0.0f && !fix::InstallDestructionBudget()) g_config.destructionBudgetMs = 0.0f;
     for (int i = 0; i < static_cast<int>(Addr::Count); ++i) {
         const td::AddrInfo& info = td::kAddrs[i];
         if (!info.code || !info.label[0]) continue;
@@ -409,6 +426,8 @@ bool InstallEngineHooks() {
         if (g_ctxCount >= kMaxTimed) break;
         if (a == Addr::ShapeTouchTest && g_config.touchCache) continue;  // the cache hook times it itself
         if (a == Addr::SplitNewBodyUpdate && g_config.staticBodyUpdate) continue;  // (so does the fix's)
+        if (a == Addr::SceneQueryShapes && g_config.splitQueries) continue;  // (and the split queries')
+        if (a == Addr::MakeHoleCore && fix::DestructionBudgetOn()) continue;  // (and the destruction budget's)
         if (!td::CodeMatches(a)) {
             LOG("timed %s: bytes differ, skipped", info.name);
             ++skipped;
@@ -440,6 +459,7 @@ bool InstallEngineHooks() {
     if (g_config.touchCache) fix::InstallTouchCache();
     if (g_config.visibleEarlyOut) fix::InstallVisibleEarlyOut();
     if (g_config.staticBodyUpdate) fix::InstallStaticBodyUpdate();
+    if (g_config.splitQueries && !fix::InstallSplitQueries()) g_config.splitQueries = false;
     if (g_config.keepDebris) fix::InstallKeepDebris();
     if (g_config.splitJobsMin != 16) fix::InstallSplitJobsMin(g_config.splitJobsMin);
     if (g_config.mode == "record" || g_config.mode == "replay") inputrec::Install();

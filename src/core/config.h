@@ -238,6 +238,17 @@ struct Config {
     // a split doesn't refresh the static body it cut from (src/fix/static_body_update.h); every Nth skip is checked
     bool staticBodyUpdate = true;
     int staticBodyUpdateValidate = 64;
+    // the scene queries of the connectivity search after a hole come from a mirror of the static broadphase trees
+    // (src/fix/split_queries.h; single player); every Nth served query is checked against the engine's
+    bool splitQueries = false;
+    int splitQueriesValidate = 64;
+    // Destruction spread over frames (src/fix/destruction_budget.h): once the holes made in a frame took this many ms,
+    // impact damage (the game's and PhysX's), the debris tool's cuts and scripts' holes whose count the script drops
+    // wait for the next frames. Explosions, projectiles and scripts' holes whose count is used are never delayed.
+    // 0: off, every hole in the frame it happens in (the game's way; the development defaults).
+    float destructionBudgetMs = 5.0f;
+    int destructionMaxWaitTicks = 30;     // a waiting hole is made after this many ticks, budget or not
+    bool destructionBudgetScripts = true;  // 0: scripts' holes never wait
     bool visibleEarlyOut = true;    // IsBodyVisible stops at the first visible point (src/fix/visible_early_out.h)
     // the rubble cleanup deletes no small pieces (src/fix/keep_debris.h). The game deletes small resting debris unless
     // it is within 5 m, or within 30 m and in view: what keeps its own physics affordable, and piles from forming.

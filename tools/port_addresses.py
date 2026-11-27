@@ -50,6 +50,11 @@ SITES = [
     ('ContactWake.ret4', 0x0bd103, 'src/px/shadow.cpp kContactWakeReturns'),
     ('ContactWake.ret5', 0x0bd12d, 'src/px/shadow.cpp kContactWakeReturns'),
     ('PlayerGroundWakeReturn', 0x0c5624, 'src/px/shadow.cpp kPlayerGroundWakeReturn'),
+    ('SplitQueries.kCollectReturn', 0x13b08a, 'src/fix/split_queries.cpp'),
+    ('SplitQueries.kFloodReturn', 0x140a6e, 'src/fix/split_queries.cpp'),
+    ('DestructionBudget.kImpactReturn', 0x0bacc3, 'src/fix/destruction_budget.cpp'),
+    ('DestructionBudget.kWrapperReturn', 0x13fc43, 'src/fix/destruction_budget.cpp'),
+    ('DestructionBudget.kExplosionReturn', 0x1a330c, 'src/fix/destruction_budget.cpp'),
 ]
 
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)

@@ -8,7 +8,7 @@ Times: "self" = a hooked function's own time minus hooked functions it called on
 """
 import argparse, bisect, collections, csv, json, os, statistics, struct, sys
 
-INSTANT = {'profiler_category', 'state_switch', 'bench_marker', 'trace_drops'}
+INSTANT = {'profiler_category', 'state_switch', 'bench_marker', 'trace_drops', 'hole_queued'}
 MARKERS = {1: 'level running', 2: 'carving starts', 3: 'carving ends', 4: 'level requested', 9: 'bench failed'}
 STATES = ['NONE', 'SPLASH', 'MENU', 'UI', 'LOADING', 'MENU_LOADING', 'PLAY', 'EDIT', 'QUIT']
 
@@ -173,7 +173,7 @@ def main():
             f_holes[fi][2] += dur
         elif nm == 'makehole_core':
             vox = arg & 0xffffffff
-            spheres = (arg >> 32) & 0x7fffffff
+            spheres = (arg >> 32) & 0x3fffffff  # (bit 62: made from [Fix] DestructionBudgetMs's queue)
             impact = arg >> 63
             f_mh[fi][0] += 1
             f_mh[fi][1] += vox

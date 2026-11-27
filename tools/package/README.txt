@@ -61,6 +61,10 @@ What changes in the game
   [PhysX] SmallDebrisCollide=0 brings back the game's behaviour.
 - The game's cleanup no longer deletes small debris out of view or far away. [Fix] KeepDebris=0 brings it back.
 - PhysX's collisions make the game's impact sounds and break voxels as the game's own collisions do.
+- Destruction is spread over frames: once the holes made in one frame took 5 ms, the ones that can wait are made
+  in the next frames, a frame or two later (impact damage, and holes made by scripts that don't need the result
+  right away, such as most tools and laser mods). [Fix] DestructionBudgetMs=0 brings back the game's behaviour,
+  every hole in the frame it happens in.
 
 Good to know
 ------------
@@ -68,7 +72,9 @@ Good to know
   instance). Once it settles, it sleeps.
 - When a big pile wakes up (you walk onto it) or falls asleep, the game can stutter once.
 - The debris tool ([Tool] Enabled=1) cuts whatever you aim at into pieces while you hold the middle mouse button:
-  a quick way to make piles. It is off by default.
+  a quick way to make piles. It is off by default. Its cuts share the destruction budget above, so a big cut takes
+  a moment to come loose.
+- A single hole can't be spread: one big hole (a laser on a large building) still costs its frame.
 
 Logs and bug reports
 --------------------

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/config.h"
@@ -41,12 +42,16 @@ constexpr uintptr_t kSplitTwin = 0x142c29;
 // those that ended up in the body, to those it gave them last time (the breakage driver finishes its new shapes after
 // the refresh inside it, which can reset their flags), and to unflagged shapes at the list's head (setParent puts a
 // shape moved in from another body first). The full original runs every kFullEvery-th time.
+// Both sets hold live shapes only: Shape's destructor takes a shape out of them (a set kept a pointer to a destroyed
+// shape until the next refresh read it, which crashed once the heap had returned that memory to the system).
 constexpr uint32_t kFullEvery = 32;
 constexpr size_t kMaxCreated = 200000;  // more since a refresh (a level loading): the next one is a full one
+constexpr size_t kMaxRecent = 4096;
 SRWLOCK g_lock = SRWLOCK_INIT;
-std::vector<uint8_t*> g_created;  // shapes made since they were last looked at
+thread_local bool t_locked = false;  // this thread holds g_lock (HkUpdate)
+std::unordered_set<uint8_t*> g_created;  // shapes made since they were last looked at
 bool g_overflow = false;
-std::vector<uint8_t*> g_recent;  // shapes the last refresh gave the static bits
+std::unordered_set<uint8_t*> g_recent;  // shapes the last refresh gave the static bits
 std::unordered_map<uint8_t*, uint32_t> g_sinceFull;  // static body -> partial refreshes since its full one
 std::atomic<uint64_t> g_calls{0}, g_full{0}, g_partial{0}, g_added{0}, g_validated{0}, g_mismatch{0};
 
@@ -72,14 +77,14 @@ inline void MakeStatic(uint8_t* s) {
 // The created shapes a refresh of `body` doesn't need any more: its own, dead ones, those of dynamic bodies (their
 // refresh is the original). Kept: those not attached yet and those of other static bodies.
 void PruneCreated(uint8_t* body) {
-    size_t k = 0;
-    for (uint8_t* s : g_created) {
-        if (!LiveShape(s)) continue;
-        uint8_t* p = Parent(s);
-        if (p == body || (p && !IsStatic(p))) continue;
-        g_created[k++] = s;
+    for (auto it = g_created.begin(); it != g_created.end();) {
+        uint8_t* s = *it;
+        uint8_t* p = LiveShape(s) ? Parent(s) : nullptr;
+        if (!LiveShape(s) || p == body || (p && !IsStatic(p)))
+            it = g_created.erase(it);
+        else
+            ++it;
     }
-    g_created.resize(k);
 }
 
 // The original after a partial refresh, every Nth: it must change no shape's flags.
@@ -110,9 +115,21 @@ void Validate(uint8_t* body, uint32_t sinceFull) {
 void Created(uint8_t* self) {  // (td::OnShapeCreated)
     AcquireSRWLockExclusive(&g_lock);
     if (g_created.size() < kMaxCreated)
-        g_created.push_back(self);
+        g_created.insert(self);
     else
         g_overflow = true;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+void Destroyed(uint8_t* self) {  // (td::OnShapeDestroyed)
+    if (t_locked) {  // the engine's refresh destroyed it (it never does): the sets aren't being walked then
+        g_created.erase(self);
+        g_recent.erase(self);
+        return;
+    }
+    AcquireSRWLockExclusive(&g_lock);
+    g_created.erase(self);
+    g_recent.erase(self);
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -123,6 +140,7 @@ void __fastcall HkUpdate(uint8_t* body) {
     bool partial = false;
     if (body && IsStatic(body) && (ret == kSplitFinish || ret == kSplitTwin)) {
         AcquireSRWLockExclusive(&g_lock);
+        t_locked = true;
         uint32_t& since = g_sinceFull[body];  // 0: never refreshed in full
         partial = since > 0 && since < kFullEvery && !g_overflow;
         if (partial) {
@@ -143,8 +161,8 @@ void __fastcall HkUpdate(uint8_t* body) {
             for (uint8_t* e = FirstChild(body); e && IsShape(e) && Unflagged(e) && guard < 4096;
                  e = NextSibling(e), ++guard)
                 fix(e);
-            g_recent.swap(touched);
-            if (g_recent.size() > 4096) g_recent.resize(4096);
+            g_recent.clear();
+            g_recent.insert(touched.begin(), touched.begin() + std::min(touched.size(), kMaxRecent));
             PruneCreated(body);
             ++since;
             uint64_t n = ++g_partial;
@@ -164,6 +182,7 @@ void __fastcall HkUpdate(uint8_t* body) {
                 PruneCreated(body);
             }
         }
+        t_locked = false;
         ReleaseSRWLockExclusive(&g_lock);
     } else {
         oUpdate(body);
@@ -190,7 +209,7 @@ bool InstallStaticBodyUpdate() {
             return false;
         }
     }
-    MH_STATUS st = td::OnShapeCreated(&Created) ? MH_OK : MH_ERROR_NOT_CREATED;
+    MH_STATUS st = td::OnShapeCreated(&Created) && td::OnShapeDestroyed(&Destroyed) ? MH_OK : MH_ERROR_NOT_CREATED;
     if (st == MH_OK)
         st = MH_CreateHook(reinterpret_cast<void*>(td::VA(Addr::SplitNewBodyUpdate)),
                            reinterpret_cast<void*>(&HkUpdate), reinterpret_cast<void**>(&oUpdate));

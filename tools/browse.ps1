@@ -55,11 +55,26 @@ if ($Queue) {
 }
 
 if (Get-Process -Name teardown -ErrorAction SilentlyContinue) { throw 'Close Teardown first.' }
-if ($Player -and (Test-Path $playerLogs)) { throw "$playerLogs exists (your own install?): not starting" }
 if (-not $InQueue -and -not $Force -and ((& $queueCmd status) -match '^RUNNING')) {
     throw "Another agent's queued test is running right now (queue.ps1 status); playing would disturb it. Use -Queue."
 }
 New-Item -ItemType Directory -Force $Out | Out-Null
+
+# Your own install of the plugin (a release zip in the game folder: dxgi.dll, TeardownPhysX.asi, its ini and logs) is
+# moved aside for the session and put back afterwards, hashes checked (research\scripts\user_install_aside.ps1, as the
+# test jobs do; without that script install.ps1 refuses to replace it). A session that ended before putting it back
+# left it in the backup: it is put back at the end of this one.
+$asideScript = Join-Path $repo 'research\scripts\user_install_aside.ps1'
+function Set-UserInstallAside {
+    if (-not (Test-Path $asideScript)) { return }
+    if (Test-Path (Join-Path $repo 'research\backups\user-install-20261105\manifest.json')) {
+        Write-Output 'your own install is still set aside from an earlier session: it is put back at the end'
+        return
+    }
+    if (Test-Path (Join-Path $GameDir 'TeardownPhysX.install.json')) { return }  # a test install: install.ps1 replaces it
+    & $asideScript -Aside -GameDir $GameDir
+}
+function Restore-UserInstall { if (Test-Path $asideScript) { & $asideScript -Restore -GameDir $GameDir } }
 
 # Profile copy: settings, progress and mod lists (so the same mods are enabled). The real profile is not touched.
 $real = Join-Path $env:LOCALAPPDATA 'Teardown'
@@ -114,7 +129,6 @@ Copy-Item $Asi $Out -Force
 # a pinned build brings its own GPU module (research\builds\<name>\PhysXGpu_64.dll), else build\'s
 $beside = Join-Path (Split-Path -Parent $Asi) 'PhysXGpu_64.dll'
 $gpuDll = if (Test-Path $beside) { $beside } else { '' }
-& (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $Out 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
 
 # RAM and VRAM every 10 s while the game runs, from Windows' own counters (Task Manager's), into memory.csv:
 #   game_ram_mb    the game's private memory (committed: Task Manager's commit size)
@@ -151,7 +165,13 @@ function Write-MemorySample($game, [datetime]$start) {
         ($now - $start).TotalSeconds, $ram, $inRam, (Get-FreeRamMb), $vram, (Get-CardVramMb))
 }
 
+Set-UserInstallAside
+if ($Player -and (Test-Path $playerLogs)) {
+    Restore-UserInstall
+    throw "$playerLogs exists (your own install's logs?): not starting"
+}
 try {
+    & (Join-Path $PSScriptRoot 'install.ps1') -Asi (Join-Path $Out 'TeardownPhysX.asi') -Ini $ini -GameDir $GameDir -GpuDll $gpuDll
     $env:TDPX_INI = $ini
     $env:SteamAppId = '1167630'
     $env:SteamGameId = '1167630'
@@ -170,10 +190,15 @@ try {
     }
 }
 finally {
-    & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
-    if ($Player -and (Test-Path $playerLogs)) {  # the plugin's own log folder, as a player's game gets it
-        Get-ChildItem $playerLogs -File | ForEach-Object { Move-Item $_.FullName $Out -Force }
-        Remove-Item $playerLogs -Recurse -Force
+    try {
+        & (Join-Path $PSScriptRoot 'uninstall.ps1') -GameDir $GameDir
+        if ($Player -and (Test-Path $playerLogs)) {  # the plugin's own log folder, as a player's game gets it
+            Get-ChildItem $playerLogs -File | ForEach-Object { Move-Item $_.FullName $Out -Force }
+            Remove-Item $playerLogs -Recurse -Force
+        }
+    }
+    finally {
+        Restore-UserInstall
     }
 }
 $changed = @(foreach ($f in Get-ChildItem $real -File -Recurse -Force) {

@@ -22,6 +22,7 @@
 #include "core/config.h"
 #include "core/crash.h"
 #include "core/log.h"
+#include "fix/destruction_budget.h"
 #include "px/colliders.h"
 #include "px/world.h"
 #include "td/addresses.h"
@@ -399,7 +400,6 @@ int g_maxSpeedHandle = 0;
 float g_maxSpeedMass = 0.0f;
 
 using DtorFn = void*(__fastcall*)(uint8_t* self, uint32_t flags);
-DtorFn oBodyDtor = nullptr, oShapeDtor = nullptr;
 using NarrowWakeFn = void(__fastcall*)(uint8_t* physics, uint8_t* body);
 NarrowWakeFn oNarrowWake = nullptr;
 using LuaFn = void(__fastcall*)(void* ctx, void* args, void* ret);
@@ -507,7 +507,7 @@ void ReleaseStatic(StaticShape& ss) {
 std::unordered_set<uint8_t*> g_proxies;
 
 // Native shape -> the body whose PhysX colliders were built from it. A shape that dies marks that body for a rebuild
-// (HkShapeDtor) even when the engine unlinked it from its body first.
+// (OnShapeDtor) even when the engine unlinked it from its body first.
 std::unordered_map<uint8_t*, uint8_t*> g_shapeOwner;
 uint64_t g_shapeDeathsUnowned = 0;  // diagnostics: dying shapes no tracked body was built from
 std::vector<uint8_t*> g_diedOwners;  // bodies that lost a shape since the last scan
@@ -1222,7 +1222,7 @@ std::vector<std::pair<uint8_t*, HoleSphere>> g_holes;  // by target body; carved
 bool g_damageOk = false;                                // MakeHoleCore and the strength table matched at install
 bool g_carving = false;                                 // CarveImpacts is running (main thread)
 std::unordered_set<uint8_t*> g_carveDead;               // bodies destroyed meanwhile
-uint64_t g_damageHits = 0, g_damageHoles = 0, g_damageCarves = 0, g_damageSkipped = 0;
+uint64_t g_damageHits = 0, g_damageHoles = 0, g_damageCarves = 0, g_damageSkipped = 0, g_damageDeferred = 0;
 
 void BuildDamage() {
     if (g_damagePts.empty()) return;
@@ -1309,7 +1309,7 @@ void CarveImpacts() {
     void* world = td::At<void*>(scene, 0x10);
     const void* noImpulse = reinterpret_cast<const void*>(td::VA(Addr::NoImpulseDesc));
     static std::vector<HoleSphere> spheres;
-    int carves = 0;
+    int carves = 0, made = 0;
     for (size_t i = 0; i < holes.size();) {
         uint8_t* body = holes[i].first;
         spheres.clear();
@@ -1321,11 +1321,18 @@ void CarveImpacts() {
             g_damageSkipped += spheres.size();
             continue;
         }
+        ++carves;
+        g_damageHoles += spheres.size();
+        // [Fix] DestructionBudgetMs: once this frame's holes took the budget, the rest wait for the next ticks
+        if (fix::DestructionBudgetLeftMs() <= 0.0 &&
+            fix::DestructionDefer(body, spheres.data(), int(spheres.size()), true)) {
+            ++g_damageDeferred;
+            continue;
+        }
         HoleList list{int(spheres.size()), int(spheres.size()), spheres.data()};
         td::Fn<MakeHoleCoreFn>(Addr::MakeHoleCore)(world, body, &list, 1, noImpulse);
-        ++carves;
+        ++made;
         ++g_damageCarves;
-        g_damageHoles += spheres.size();
     }
     holes.clear();
     AcquireSRWLockExclusive(&g_lock);
@@ -1333,7 +1340,7 @@ void CarveImpacts() {
     g_carveDead.clear();
     // Destruction wakes what it touched. This tick's changes were collected already, so owned bodies woken here
     // are handed to PhysX now; the native step would move them otherwise.
-    if (carves)
+    if (made)
         for (auto& [b, e] : g_owned)
             if (BodyAwake(b)) {
                 ++g_off.nativeWakes;
@@ -4271,10 +4278,11 @@ void Report(bool final) {
     if (g_offload) ReportOffload(final, s, proxies, waiting);
     LOG("shadow%s impact events since start: the game's own %llu (%llu audible); PhysX %llu reports, %llu sounds made, "
         "%llu played; damage: %llu fast contact points, %llu breaking contacts, %llu holes in %llu carves (%llu "
-        "skipped); %llu stale shape reads dropped, %llu points naming a destroyed shape dropped (%llu shapes died "
+        "skipped, %llu carves waited for a later frame); %llu stale shape reads dropped, %llu points naming a destroyed shape dropped (%llu shapes died "
         "whose body was gone)",
         final ? " TOTAL" : "", g_gameEvents, g_gameAudible, g_impactReports, g_soundsMade, g_soundsInjected,
-        g_damagePoints, g_damageHits, g_damageHoles, g_damageCarves, g_damageSkipped, g_staleReads, g_deadNamed,
+        g_damagePoints, g_damageHits, g_damageHoles, g_damageCarves, g_damageSkipped, g_damageDeferred, g_staleReads,
+        g_deadNamed,
         g_shapeDeathsUnowned);
     ReportDeaths(final);
     if (PxScene* sc = px::Scene()) {
@@ -4555,9 +4563,9 @@ void ReportDeaths(bool final) {
     ReleaseSRWLockShared(&g_deathLock);
 }
 
-void* __fastcall HkBodyDtor(uint8_t* self, uint32_t flags) {
+// A body is about to be destroyed (td::OnBodyDestroyed: the destructor is shared with other features).
+void OnBodyDtor(uint8_t* self, uintptr_t ret) {
     if (g_active) {
-        const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
         if (g_inStep.load(std::memory_order_acquire)) {  // engine jobs may be reading the maps: forget it after
             NoteDeath(ret, nullptr);
             AcquireSRWLockExclusive(&g_stepLock);
@@ -4577,10 +4585,10 @@ void* __fastcall HkBodyDtor(uint8_t* self, uint32_t flags) {
             ReleaseSRWLockExclusive(&g_lock);
         }
     }
-    return oBodyDtor(self, flags);
 }
 
-void* __fastcall HkShapeDtor(uint8_t* self, uint32_t flags) {
+// A shape is about to be destroyed (td::OnShapeDestroyed: shared with other features).
+void OnShapeDtor(uint8_t* self) {
     if (g_active) {
         AcquireSRWLockExclusive(&g_lock);
         g_deadSinceKick.insert(self);  // PhysX may still name it until the next scan
@@ -4612,7 +4620,6 @@ void* __fastcall HkShapeDtor(uint8_t* self, uint32_t flags) {
         ReleaseSRWLockExclusive(&g_newLock);
         ReleaseSRWLockExclusive(&g_lock);
     }
-    return oShapeDtor(self, flags);
 }
 
 // NarrowWake's calls from contact processing, as return addresses (Teardown 2.2.0): add-contact 0x1400b47c0 and the
@@ -4790,8 +4797,7 @@ bool Hook(Addr a, void* detour, void** original) {
 
 bool Install() {
     if (!g_config.pxShadow) return true;
-    bool ok = Hook(Addr::BodyDtor, reinterpret_cast<void*>(&HkBodyDtor), reinterpret_cast<void**>(&oBodyDtor)) &&
-              Hook(Addr::ShapeDtor, reinterpret_cast<void*>(&HkShapeDtor), reinterpret_cast<void**>(&oShapeDtor));
+    bool ok = td::OnBodyDestroyed(&OnBodyDtor) && td::OnShapeDestroyed(&OnShapeDtor);
     // static shapes that appear while the level runs join the grid the next tick (else at its rebuild, every 600)
     const bool shapeEvents = ok && td::OnShapeCreated(&OnNewShape);
     LOG("shadow: PhysX mode %d, destructor hooks %s, new-shape events %s", g_config.pxShadow,
